@@ -1,0 +1,13 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":1,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+< {"jsonrpc":"2.0","id":"nacos-manager-host-1","method":"host.storage.get","params":{"key":"profiles"}}
+> {"jsonrpc":"2.0","id":"nacos-manager-host-1","error":{"code":-32001,"message":"storage capability not granted"}}
+< {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"[NACOS_STORAGE] Profile storage permission is not granted for this plugin."}}
+> {"jsonrpc":"2.0","id":3,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+< {"jsonrpc":"2.0","id":"nacos-manager-host-2","method":"host.storage.get","params":{"key":"profiles"}}
+> {"jsonrpc":"2.0","id":"nacos-manager-host-2","error":{"code":-32002,"message":"disk full"}}
+< {"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"[NACOS_STORAGE] Profile storage is unavailable or failed; try again. Passwords are never kept in profile storage."}}
+> {"jsonrpc":"2.0","id":4,"method":"plugin.shutdown"}
+< {"jsonrpc":"2.0","id":4,"result":{}}
+# eof

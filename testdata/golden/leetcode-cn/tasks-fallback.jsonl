@@ -1,0 +1,13 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":1,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.task.start","params":{"taskId":"t1","action":"leetcode.submit","payload":"{\"titleSlug\":\"two-sum\",\"lang\":\"cpp\",\"code\":\"class Solution {};\"}"}}
+< {"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}
+> {"jsonrpc":"2.0","id":3,"method":"plugin.task.status","params":{"taskId":"t1"}}
+< {"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"method not found"}}
+> {"jsonrpc":"2.0","id":4,"method":"plugin.task.cancel","params":{"taskId":"t1"}}
+< {"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"method not found"}}
+> {"jsonrpc":"2.0","id":5,"method":"plugin.invoke","params":{"action":"leetcode.submit","payload":"{\"titleSlug\":\"two-sum\",\"lang\":\"cpp\",\"code\":\"class Solution {};\"}"}}
+< {"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"请先登录后再提交代码"}}
+> {"jsonrpc":"2.0","id":6,"method":"plugin.shutdown"}
+< {"jsonrpc":"2.0","id":6,"result":{}}
+# eof

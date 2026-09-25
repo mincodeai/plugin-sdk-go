@@ -1,0 +1,57 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.ping"}
+< {"id":1,"jsonrpc":"2.0","result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.invoke","params":{"action":"nope","payload":"{}"}}
+< {"error":{"code":-32601,"message":"不支持的操作"},"id":2,"jsonrpc":"2.0"}
+> {bad json
+> []
+> {"jsonrpc":"1.0","id":3,"method":"plugin.ping"}
+< {"id":3,"jsonrpc":"2.0","result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":4,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"id":4,"jsonrpc":"2.0","result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":5,"method":"plugin.ping"}
+< {"id":5,"jsonrpc":"2.0","result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":6,"method":"plugin.nope"}
+< {"error":{"code":-32601,"message":"不支持的方法"},"id":6,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":7,"method":"plugin.invoke","params":{"action":"nope","payload":"{}"}}
+< {"error":{"code":-32601,"message":"不支持的操作"},"id":7,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":8,"method":"plugin.invoke","params":{"action":"nope","payload":5}}
+< {"error":{"code":-32601,"message":"不支持的操作"},"id":8,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":9,"method":"plugin.invoke"}
+< {"error":{"code":-32601,"message":"不支持的操作"},"id":9,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":10,"method":"plugin.invoke","params":{"payload":"{}"}}
+< {"error":{"code":-32601,"message":"不支持的操作"},"id":10,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":11,"method":"plugin.task.status","params":{"taskId":"t1"}}
+< {"error":{"code":-32601,"message":"Tasks were not negotiated"},"id":11,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":12,"method":"plugin.task.start","params":{"taskId":"t1","action":"nope","payload":"{}"}}
+< {"error":{"code":-32601,"message":"Tasks were not negotiated"},"id":12,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":13,"method":"plugin.invoke","params":{"action":"listAssets","payload":5}}
+< {"error":{"code":-32602,"message":"参数必须是对象"},"id":13,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":14,"method":"plugin.invoke","params":{"action":"listAssets","payload":"[1]"}}
+< {"error":{"code":-32602,"message":"参数必须是对象"},"id":14,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":15,"method":"plugin.invoke","params":{"action":"listAssets","payload":"{bad"}}
+< {"error":{"code":-32602,"message":"Payload must contain valid JSON"},"id":15,"jsonrpc":"2.0"}
+> {"jsonrpc":"2.0","id":16,"method":"plugin.invoke","params":{"action":"listAssets","payload":""}}
+< {"id":"host-1","jsonrpc":"2.0","method":"host.storage.get","params":{"key":"certificate-manager.assets"}}
+> {"jsonrpc":"2.0","id":"host-1","result":null}
+< {"id":16,"jsonrpc":"2.0","result":{"result":[]}}
+> {"jsonrpc":"2.0","id":17,"method":"plugin.invoke","params":{"action":"listAssets"}}
+< {"id":"host-2","jsonrpc":"2.0","method":"host.storage.get","params":{"key":"certificate-manager.assets"}}
+> {"jsonrpc":"2.0","id":"host-2","result":null}
+< {"id":17,"jsonrpc":"2.0","result":{"result":[]}}
+> {"jsonrpc":"2.0","id":18,"method":"plugin.invoke","params":{"action":"listAssets","payload":{}}}
+< {"id":"host-3","jsonrpc":"2.0","method":"host.storage.get","params":{"key":"certificate-manager.assets"}}
+> {"jsonrpc":"2.0","id":"host-3","result":null}
+< {"id":18,"jsonrpc":"2.0","result":{"result":[]}}
+> {"jsonrpc":"2.0","id":19,"method":"plugin.invoke","params":{"action":"listAssets","payload":"{}"}}
+< {"id":"host-4","jsonrpc":"2.0","method":"host.storage.get","params":{"key":"certificate-manager.assets"}}
+> {"jsonrpc":"2.0","id":"host-4","result":null}
+< {"id":19,"jsonrpc":"2.0","result":{"result":[]}}
+> {"jsonrpc":"2.0","id":20,"method":"plugin.invoke","params":{"action":"listAssets","payload":"{\"unexpected\":true}"}}
+< {"id":"host-5","jsonrpc":"2.0","method":"host.storage.get","params":{"key":"certificate-manager.assets"}}
+> {"jsonrpc":"2.0","id":"host-5","result":null}
+< {"id":20,"jsonrpc":"2.0","result":{"result":[]}}
+> {"jsonrpc":"2.0","id":98,"method":"plugin.shutdown"}
+< {"id":98,"jsonrpc":"2.0","result":{}}
+# eof
+! Invalid plugin RPC request
+! Invalid plugin RPC request

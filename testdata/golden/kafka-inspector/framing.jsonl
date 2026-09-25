@@ -1,0 +1,33 @@
+> {"jsonrpc":"2.0","id":"s-1","method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":"s-1","result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":"<&> x","method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":"<&>\u2028x","result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":-7,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":-7,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":1.5,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":1.5,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":1e3,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":1e3,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":0,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":0,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":null,"method":"plugin.ping"}
+> {"jsonrpc":"2.0","id":true,"method":"plugin.ping"}
+> {"jsonrpc":"2.0","id":{},"method":"plugin.ping"}
+> {"jsonrpc":"2.0","id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","method":"plugin.ping"}
+> {"jsonrpc":"2.0","method":"plugin.ping"}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.ping","id":3}
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> {"jsonrpc":"2.0","id":4,"method":"plugin.ping","params":"\udc00"}
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> {"jsonrpc":"2.0","id":5,"method":"plugin.ping"} {}
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+>    
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> 
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> {"jsonrpc":"2.0","id":6,"method":5}
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> {"jsonrpc":"2.0","id":"unknown-host-id","result":{}}
+> {"jsonrpc":"2.0","id":7,"method":"plugin.ping","params":"@@PAD1048600@@"}
+# eof
+! Kafka plugin transport failed

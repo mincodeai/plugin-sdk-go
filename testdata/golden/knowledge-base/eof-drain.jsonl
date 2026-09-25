@@ -1,0 +1,5 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":1,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.invoke","params":{"action":"libraries","payload":"{}"}}
+< {"jsonrpc":"2.0","id":"host-1","method":"host.storage.list","params":{}}
+# eof

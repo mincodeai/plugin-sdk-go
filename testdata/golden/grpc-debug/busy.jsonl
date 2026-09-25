@@ -1,0 +1,16 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":1,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":10,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":11,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":12,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":13,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":14,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":15,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":16,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":17,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+> {"jsonrpc":"2.0","id":9,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+<~ {"jsonrpc":"2.0","id":"grpc-debug-host-1","method":"host.storage.get","params":{"key":"profiles"}}
+<~ {"jsonrpc":"2.0","id":9,"error":{"code":-32029,"message":"插件繁忙，请稍后重试 / Plugin busy, try again later"}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.shutdown"}
+< {"jsonrpc":"2.0","id":2,"result":{}}
+# eof

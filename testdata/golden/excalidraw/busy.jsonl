@@ -1,0 +1,9 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":1,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":10,"method":"plugin.invoke","params":{"action":"docs.list","payload":"{}"}}
+> {"jsonrpc":"2.0","id":9,"method":"plugin.invoke","params":{"action":"docs.list","payload":"{}"}}
+<~ {"jsonrpc":"2.0","id":"host-1","method":"host.storage.get","params":{"key":"docs-index-v1"}}
+<~ {"jsonrpc":"2.0","id":9,"error":{"code":-32029,"message":"已有任务运行，请稍后重试"}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.shutdown"}
+< {"jsonrpc":"2.0","id":2,"result":{}}
+# eof

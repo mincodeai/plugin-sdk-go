@@ -1,0 +1,59 @@
+> {"jsonrpc":"2.0","id":1,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":1,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":2,"method":"plugin.invoke","params":{"action":"nope","payload":"{}"}}
+< {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Plugin not initialized"}}
+> {bad json
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> []
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> {"jsonrpc":"1.0","id":3,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}}
+> {"jsonrpc":"2.0","id":4,"method":"plugin.initialize","params":{"runtimeProtocolVersion":1}}
+< {"jsonrpc":"2.0","id":4,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":5,"method":"plugin.ping"}
+< {"jsonrpc":"2.0","id":5,"result":{"runtimeProtocolVersion":1}}
+> {"jsonrpc":"2.0","id":6,"method":"plugin.nope"}
+< {"jsonrpc":"2.0","id":6,"error":{"code":-32601,"message":"Method not found"}}
+> {"jsonrpc":"2.0","id":7,"method":"plugin.invoke","params":{"action":"nope","payload":"{}"}}
+< {"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"[NATS_INPUT] unknown action \"nope\""}}
+> {"jsonrpc":"2.0","id":8,"method":"plugin.invoke","params":{"action":"nope","payload":5}}
+< {"jsonrpc":"2.0","id":8,"error":{"code":-32602,"message":"[NATS_INPUT] Invalid input or unsupported option."}}
+> {"jsonrpc":"2.0","id":9,"method":"plugin.invoke"}
+< {"jsonrpc":"2.0","id":9,"error":{"code":-32602,"message":"[NATS_INPUT] Invalid input or unsupported option."}}
+> {"jsonrpc":"2.0","id":10,"method":"plugin.invoke","params":{"payload":"{}"}}
+< {"jsonrpc":"2.0","id":10,"error":{"code":-32602,"message":"[NATS_INPUT] unknown action \"\""}}
+> {"jsonrpc":"2.0","id":11,"method":"plugin.task.status","params":{"taskId":"t1"}}
+< {"jsonrpc":"2.0","id":11,"error":{"code":-32601,"message":"Method not found"}}
+> {"jsonrpc":"2.0","id":12,"method":"plugin.task.start","params":{"taskId":"t1","action":"nope","payload":"{}"}}
+< {"jsonrpc":"2.0","id":12,"error":{"code":-32601,"message":"Method not found"}}
+> {"jsonrpc":"2.0","id":13,"method":"plugin.invoke","params":{"action":"listProfiles","payload":5}}
+< {"jsonrpc":"2.0","id":13,"error":{"code":-32602,"message":"[NATS_INPUT] Invalid input or unsupported option."}}
+> {"jsonrpc":"2.0","id":14,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"[1]"}}
+< {"jsonrpc":"2.0","id":14,"error":{"code":-32602,"message":"[NATS_INPUT] Invalid input or unsupported option."}}
+> {"jsonrpc":"2.0","id":15,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{bad"}}
+< {"jsonrpc":"2.0","id":15,"error":{"code":-32602,"message":"[NATS_INPUT] Invalid input or unsupported option."}}
+> {"jsonrpc":"2.0","id":16,"method":"plugin.invoke","params":{"action":"listProfiles","payload":""}}
+< {"jsonrpc":"2.0","id":"nats-client-host-1","method":"host.storage.get","params":{"key":"profiles"}}
+> {"jsonrpc":"2.0","id":"nats-client-host-1","result":null}
+< {"jsonrpc":"2.0","id":"nats-client-host-2","method":"host.secrets.list","params":{}}
+> {"jsonrpc":"2.0","id":"nats-client-host-2","result":[]}
+< {"jsonrpc":"2.0","id":16,"result":{"max":50,"profiles":[]}}
+> {"jsonrpc":"2.0","id":17,"method":"plugin.invoke","params":{"action":"listProfiles"}}
+< {"jsonrpc":"2.0","id":"nats-client-host-3","method":"host.storage.get","params":{"key":"profiles"}}
+> {"jsonrpc":"2.0","id":"nats-client-host-3","result":null}
+< {"jsonrpc":"2.0","id":"nats-client-host-4","method":"host.secrets.list","params":{}}
+> {"jsonrpc":"2.0","id":"nats-client-host-4","result":[]}
+< {"jsonrpc":"2.0","id":17,"result":{"max":50,"profiles":[]}}
+> {"jsonrpc":"2.0","id":18,"method":"plugin.invoke","params":{"action":"listProfiles","payload":{}}}
+< {"jsonrpc":"2.0","id":18,"error":{"code":-32602,"message":"[NATS_INPUT] Invalid input or unsupported option."}}
+> {"jsonrpc":"2.0","id":19,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{}"}}
+< {"jsonrpc":"2.0","id":"nats-client-host-5","method":"host.storage.get","params":{"key":"profiles"}}
+> {"jsonrpc":"2.0","id":"nats-client-host-5","result":null}
+< {"jsonrpc":"2.0","id":"nats-client-host-6","method":"host.secrets.list","params":{}}
+> {"jsonrpc":"2.0","id":"nats-client-host-6","result":[]}
+< {"jsonrpc":"2.0","id":19,"result":{"max":50,"profiles":[]}}
+> {"jsonrpc":"2.0","id":20,"method":"plugin.invoke","params":{"action":"listProfiles","payload":"{\"unexpected\":true}"}}
+< {"jsonrpc":"2.0","id":20,"error":{"code":-32602,"message":"[NATS_INPUT] unknown field \"unexpected\""}}
+> {"jsonrpc":"2.0","id":98,"method":"plugin.shutdown"}
+< {"jsonrpc":"2.0","id":98,"result":{}}
+# eof
