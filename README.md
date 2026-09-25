@@ -6,7 +6,9 @@ MinCode 官方进程插件（`official-plugins/*/backend`）共用的 Go SDK。�
 
 ## 在插件里引用
 
-插件 backend 仍然是独立模块，用 `GOWORK=off` 构建；SDK 不发布版本，只能通过仓库内相对路径替换引用：
+仓库外的插件直接 `go get github.com/mincodeai/plugin-sdk-go@latest`。
+
+仓库内的插件 backend 仍然是独立模块，用 `GOWORK=off` 构建，通过仓库内相对路径替换引用 SDK：
 
 ```
 require github.com/mincodeai/plugin-sdk-go v0.0.0-00010101000000-000000000000
@@ -24,7 +26,7 @@ replace github.com/mincodeai/plugin-sdk-go => ../../../packages/plugin-sdk-go
 replace github.com/mincodeai/plugin-sdk-go => ./third_party/plugin-sdk-go
 ```
 
-目前的使用方是 Vue + Go 插件模板（`tools/plugin-templates/visual-process-vue-go/backend`，会经 Node devkit 与 `mincode create` 复制到开发者机器）和 draw（gitlink 仓库，由自己的 CI 构建；协议配置与 excalidraw 相同）。副本由 `tools/plugin-sdk/sync-go-sdk.mjs` 生成：只含 `go.mod`、`README.md` 与非测试 `.go` 源码（不含 `*_test.go`、`testdata/`、`internal/recorder`、`internal/goldencmp`），另写一个记录校验和的 `VERSION`。**不要手改副本**，改 SDK 后运行：
+目前的使用方是 Vue + Go 插件模板（`tools/plugin-templates/visual-process-vue-go/backend`，会经 Node devkit 与 `mincode create` 复制到开发者机器）和 draw（gitlink 仓库，由自己的 CI 构建；协议配置与 excalidraw 相同）。副本由 `tools/plugin-sdk/sync-go-sdk.mjs` 生成：只含 `go.mod`、`README.md`、`LICENSE` 与非测试 `.go` 源码（不含 `*_test.go`），另写一个记录校验和的 `VERSION`。**不要手改副本**，改 SDK 后运行：
 
 - `pnpm sync:go-sdk`：刷新全部副本（draw 未检出时跳过）；
 - `pnpm verify:go-sdk-vendor`（CI 执行）：副本与本目录不一致即失败；`pnpm verify:plugin-template` 也会先检查模板副本；
@@ -44,7 +46,8 @@ devkit 导出时另附 `sdk/go`（同样的副本）和 `tools/sync-go-sdk.mjs`�
 | `jsvalue` | 从 Node 运行时移植来的插件用的 JS 语义值：保序对象 `Obj`、`Parse`（JSON.parse）、`Stringify`（JSON.stringify，数字格式与 U+2028 保持 JS 行为）、UTF-16 长度/切片、JS 空白与真值规则 |
 | `profiles` | 版本化配置档文档 `Store`（`{"version":1,"profiles":[...]}`）、按字段记忆的凭据 `Secrets`（`profile.<id>.<field>`）、宿主错误分类 `Classify` |
 | `rpctest` | golden 对话格式 `Parse` / `Format`、逐字节回放 `Replay`、内存宿主 `FakeHost`（插件单元测试用） |
-| `internal/recorder` | 驱动已构建的原插件二进制、录制 golden 对话的工具（不对外） |
+
+录制工具与 golden 回放测试不在本模块内：它们放在仓库的 `packages/plugin-sdk-go-conformance/`（独立模块，不对外发布），以免把约 750 KB 的测试数据带进 `go get` 下载的包。
 
 ### rpc
 
@@ -154,7 +157,7 @@ n, err := creds.Forget(ctx, liveIDs, true)       // 清理不在 liveIDs 中的�
 
 ## 官方插件预设表
 
-每个插件迁移时应使用的选项值（由 `rpc/golden_test.go` 的 `preset` 逐字节验证；未列出的项取预设默认值）。
+每个插件迁移时应使用的选项值（由 `packages/plugin-sdk-go-conformance/golden/golden_test.go` 的 `preset` 逐字节验证；未列出的项取预设默认值）。
 
 Go 原生家族（`StrictDefaults(id)`；`MapError`：`-32001` → 未授权文案，其它 `*host.Error` → 失败文案，均为 `-32000`）：
 
@@ -202,11 +205,11 @@ Node 家族（`NodeDefaults()`）：
 
 leetcode-cn（`StrictDefaults("leetcode-cn")`，复刻旧的最小同步循环）：`StrictJSON`、`RequireVersion`、`RequireInitialize` 均为 false；`DecodeEnvelope` 用 DisallowUnknownFields 结构体解码（要求 `"jsonrpc":"2.0"`、非空 id、非空 method，只读首个 JSON 值）；`InvalidMessage: invalid JSON-RPC request` + `InvalidOmitID`；`IDs: IDAny`；`MethodNotFound` 与 `TasksNotNegotiated` 均为 `method not found`；`FatalMessage: read JSON-RPC request: bufio.Scanner: token too long`；`MaxInflight 32`；`InvalidParams: invalid invoke parameters`；`KeepEmptyPayload`；`MapError` 把所有错误映射为 `-32602 err.Error()`（未知 action：`未知动作：x`）；`Tasks: {MaxRunning: 2, Deadline: 150s, Start}`，`Start` 只接受 `leetcode.run` / `leetcode.submit`，判题进度经 `ReportProgress` 上报。
 
-保持自定义、不迁移：file-viewer（由模板派生，不在 goPlugins 中）。etcd-manager、network-diagnostics、leetcode-cn 以及 rabbitmq/pulsar/nacos/prometheus/object-storage/mqtt/openapi/web-navigation/prd-studio 的预设见 `rpc/golden_*_test.go` 中通过 `extraPresets` 注册的配置。
+保持自定义、不迁移：file-viewer（由模板派生，不在 goPlugins 中）。etcd-manager、network-diagnostics、leetcode-cn 以及 rabbitmq/pulsar/nacos/prometheus/object-storage/mqtt/openapi/web-navigation/prd-studio 的预设见 `packages/plugin-sdk-go-conformance/golden/golden_*_test.go` 中通过 `extraPresets` 注册的配置。
 
 ## golden 对话
 
-`testdata/golden/<plugin>/*.jsonl` 由 `internal/recorder` 驱动插件二进制录制（`basic`、`framing`、`host-errors`，以及适用时的 `busy`、`eof-drain`、`tasks`）。`rpc/golden_test.go` 用每个插件的预设加一个做相同反向请求的桩 handler 回放全部对话，要求输出逐字节一致（`<~` 块按多重集合比较）。
+golden 对话与回放测试位于 `packages/plugin-sdk-go-conformance/`（模块 `mincode/plugin-sdk-go-conformance`，`replace` 指向本目录，只在仓库内运行，由 `pnpm --dir vue-app test:plugin-go`（目标 `sdk-conformance`）覆盖）。`testdata/golden/<plugin>/*.jsonl` 由 `cmd/recorder` 驱动插件二进制录制（`basic`、`framing`、`host-errors`，以及适用时的 `busy`、`eof-drain`、`tasks`）。`golden/golden_test.go` 用每个插件的预设加一个做相同反向请求的桩 handler 回放全部对话，要求输出逐字节一致（`<~` 块按多重集合比较）。
 
 格式：`> ` 写入 stdin 的行（请求或宿主回复），`< ` 下一行 stdout（逐字节），相邻的 `<~ ` 行按多重集合比较，`! ` stderr 行（整体按多重集合比较），`# eof` 关闭 stdin，`# wait 100ms` 暂停（tasks 场景让异步任务落定），`@@PAD<n>@@` 展开为 n 个 `x`。
 
@@ -222,13 +225,13 @@ leetcode-cn（`StrictDefaults("leetcode-cn")`，复刻旧的最小同步循环�
 
 ```
 (cd official-plugins/<plugin>/backend && GOWORK=off go build -o /tmp/bins/<plugin> .)
-(cd packages/plugin-sdk-go && GOWORK=off go run ./internal/recorder -j 4 -bin /tmp/bins -out testdata/golden <plugin>)
+(cd packages/plugin-sdk-go-conformance && GOWORK=off go run ./cmd/recorder -j 4 -bin /tmp/bins -out testdata/golden <plugin>)
 ```
 
-同一组二进制重复录制（包括并发负载下）应得到逐字节相同的文件（`git diff --exit-code testdata/golden`）。改动录制器或排序规则后，用 `internal/goldencmp` 证明新旧录制语义等价——每个文件的输入序列（`>`、`# eof`、`# wait`）相同、stdout 行与 stderr 行作为多重集合相同：
+同一组二进制重复录制（包括并发负载下）应得到逐字节相同的文件（`git diff --exit-code packages/plugin-sdk-go-conformance/testdata/golden`）。改动录制器或排序规则后，用 `cmd/goldencmp` 证明新旧录制语义等价——每个文件的输入序列（`>`、`# eof`、`# wait`）相同、stdout 行与 stderr 行作为多重集合相同：
 
 ```
-(cd packages/plugin-sdk-go && GOWORK=off go run ./internal/goldencmp [-missing-ok] OLD_DIR testdata/golden)
+(cd packages/plugin-sdk-go-conformance && GOWORK=off go run ./cmd/goldencmp [-missing-ok] OLD_DIR testdata/golden)
 ```
 
 ## 迁移步骤（每个插件）
@@ -238,3 +241,7 @@ leetcode-cn（`StrictDefaults("leetcode-cn")`，复刻旧的最小同步循环�
 3. 错误文案：输入错误直接返回 `rpc.NewError(...)`；宿主错误在 `MapError` 或 handler 内用 `profiles.Classify` / `host.IsCode` 映射。
 4. 配置档与凭据改用 `profiles.Store` / `profiles.Secrets`；handler 单测改用 `rpctest.FakeHost`。
 5. 运行插件原有测试、`pnpm --dir vue-app test:plugin-go <plugin>`，并用 recorder 重新录制该插件 golden 确认零差异。
+
+## 许可证
+
+本 SDK 以 [Apache License 2.0](LICENSE) 发布。

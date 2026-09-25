@@ -25,7 +25,7 @@ import (
 // Input lines may contain @@PAD<n>@@, expanded to n 'x' bytes, so oversized
 // frames need not be stored verbatim.
 //
-// Canonical layout (internal/recorder): every input line is followed by the
+// Canonical layout (packages/plugin-sdk-go-conformance/cmd/recorder): every input line is followed by the
 // stdout lines it caused, host replies directly after the host request they
 // answer. Requests sent back to back on purpose (filling a busy gate) are
 // written as consecutive "> " lines followed by one sorted "<~" block; replies
