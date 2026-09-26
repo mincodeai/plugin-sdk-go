@@ -205,7 +205,7 @@ Node 家族（`NodeDefaults()`）：
 
 leetcode-cn（`StrictDefaults("leetcode-cn")`，复刻旧的最小同步循环）：`StrictJSON`、`RequireVersion`、`RequireInitialize` 均为 false；`DecodeEnvelope` 用 DisallowUnknownFields 结构体解码（要求 `"jsonrpc":"2.0"`、非空 id、非空 method，只读首个 JSON 值）；`InvalidMessage: invalid JSON-RPC request` + `InvalidOmitID`；`IDs: IDAny`；`MethodNotFound` 与 `TasksNotNegotiated` 均为 `method not found`；`FatalMessage: read JSON-RPC request: bufio.Scanner: token too long`；`MaxInflight 32`；`InvalidParams: invalid invoke parameters`；`KeepEmptyPayload`；`MapError` 把所有错误映射为 `-32602 err.Error()`（未知 action：`未知动作：x`）；`Tasks: {MaxRunning: 2, Deadline: 150s, Start}`，`Start` 只接受 `leetcode.run` / `leetcode.submit`，判题进度经 `ReportProgress` 上报。
 
-保持自定义、不迁移：file-viewer（由模板派生，不在 goPlugins 中）。etcd-manager、network-diagnostics、leetcode-cn 以及 rabbitmq/pulsar/nacos/prometheus/object-storage/mqtt/openapi/web-navigation/prd-studio 的预设见 `packages/plugin-sdk-go-conformance/golden/golden_*_test.go` 中通过 `extraPresets` 注册的配置。
+全部 30 个官方 Go 插件都已使用本 SDK。etcd-manager、network-diagnostics、leetcode-cn、file-viewer、kubernetes-manager 以及 rabbitmq/pulsar/nacos/prometheus/object-storage/mqtt/openapi/web-navigation/prd-studio 的预设见 `packages/plugin-sdk-go-conformance/golden/golden_*_test.go` 中通过 `extraPresets` 注册的配置。
 
 ## golden 对话
 

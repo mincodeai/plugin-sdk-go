@@ -1,6 +1,7 @@
 package rpctest
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -47,6 +48,23 @@ func TestReplayEcho(t *testing.T) {
 		_, _ = out.Write(b)
 		_, _ = io.ReadAll(in)
 		_, _ = io.WriteString(errw, "bye\n")
+		return nil
+	})
+}
+
+func TestReplayRepollsRunningTaskStatus(t *testing.T) {
+	poll := `{"jsonrpc":"2.0","id":9,"method":"plugin.task.status","params":{"taskId":"t"}}`
+	done := `{"id":9,"result":{"state":"succeeded"}}`
+	tr, _ := Parse([]byte("> " + poll + "\n< " + done + "\n# eof\n"))
+	Replay(t, tr, func(_ context.Context, in io.Reader, out, _ io.Writer) error {
+		sc := bufio.NewScanner(in)
+		for polls := 0; sc.Scan(); polls++ {
+			state := "running"
+			if polls >= 2 {
+				state = "succeeded"
+			}
+			_, _ = io.WriteString(out, `{"id":9,"result":{"state":"`+state+`"}}`+"\n")
+		}
 		return nil
 	})
 }

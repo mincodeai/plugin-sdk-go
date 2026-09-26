@@ -59,11 +59,13 @@ func Replay(t testing.TB, tr Transcript, serve ServeFunc) {
 		return ""
 	}
 	var wantErr []string
+	lastSend := ""
 	for i := 0; i < len(tr); i++ {
 		l := tr[i]
 		switch l.Kind {
 		case KindSend:
-			_, _ = stdin.Write([]byte(ExpandPad(l.Text) + "\n"))
+			lastSend = ExpandPad(l.Text)
+			_, _ = stdin.Write([]byte(lastSend + "\n"))
 		case KindEOF:
 			_ = stdin.Close()
 		case KindWait:
@@ -72,7 +74,16 @@ func Replay(t testing.TB, tr Transcript, serve ServeFunc) {
 		case KindStderr:
 			wantErr = append(wantErr, l.Text)
 		case KindExpect:
-			if got := next(i); !Match(l.Text, got) {
+			got := next(i)
+			// A task that is still running when its recorded status poll arrives
+			// (slow or loaded machine) is polled again; status polls are read-only.
+			for deadline := time.Now().Add(LineTimeout); !Match(l.Text, got) && isTaskStatusPoll(lastSend) &&
+				strings.Contains(got, `"state":"running"`) && !strings.Contains(l.Text, `"state":"running"`) && time.Now().Before(deadline); {
+				time.Sleep(20 * time.Millisecond)
+				_, _ = stdin.Write([]byte(lastSend + "\n"))
+				got = next(i)
+			}
+			if !Match(l.Text, got) {
 				t.Fatalf("line %d mismatch\nwant %s\ngot  %s", i+1, clip(l.Text), clip(got))
 			}
 		case KindUnordered:
@@ -111,6 +122,10 @@ func Replay(t testing.TB, tr Transcript, serve ServeFunc) {
 	if strings.Join(gotErr, "\n") != strings.Join(wantErr, "\n") {
 		t.Fatalf("stderr mismatch\nwant %q\ngot  %q", wantErr, gotErr)
 	}
+}
+
+func isTaskStatusPoll(line string) bool {
+	return strings.Contains(line, `"method":"plugin.task.status"`)
 }
 
 func clip(s string) string {
