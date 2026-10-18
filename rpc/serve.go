@@ -39,8 +39,21 @@ type server struct {
 	finished     bool // nothing more is written
 	initialized  bool
 	negotiated   bool
-	inflight     int
-	closeOnce    sync.Once
+	// configuration is true once initialize negotiated features.configuration.
+	configuration bool
+	// database is true once initialize negotiated features.databaseDrivers.
+	database bool
+	// taskEvents is true once initialize negotiated features.taskEvents.
+	taskEvents bool
+	inflight   int
+	// concurrent is the set of Options.ConcurrentActions; concurrentInflight
+	// counts those running outside the MaxInflight gate.
+	concurrent         map[string]bool
+	concurrentInflight int
+	// waiters are invokes queued for a MaxInflight slot (Options.BusyWait),
+	// oldest first. Releasing a slot hands it to the first waiter.
+	waiters   []chan struct{}
+	closeOnce sync.Once
 }
 
 func (o *Options) setDefaults() {
@@ -65,6 +78,12 @@ func (o *Options) setDefaults() {
 	}
 	if o.MaxInflight <= 0 {
 		o.MaxInflight = 1
+	}
+	if o.MaxConcurrent <= 0 {
+		o.MaxConcurrent = 16
+	}
+	if o.MaxQueued <= 0 {
+		o.MaxQueued = 16
 	}
 	if o.Busy == nil {
 		o.Busy = NewError(CodeBusy, "Plugin busy, try again later")
@@ -101,10 +120,23 @@ func (o *Options) setDefaults() {
 func Serve(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, o Options) error {
 	o.setDefaults()
 	if o.Handler == nil {
-		return errors.New("rpc: Options.Handler is required")
+		if o.Database == nil {
+			return errors.New("rpc: Options.Handler is required")
+		}
+		// A database-driver-only plugin has no invoke actions.
+		unknown := o.UnknownAction
+		o.Handler = func(_ context.Context, action string, _ json.RawMessage) (any, error) {
+			return nil, unknown(action)
+		}
 	}
 	s := &server{o: o, out: stdout, errOut: stderr}
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	if len(o.ConcurrentActions) > 0 {
+		s.concurrent = make(map[string]bool, len(o.ConcurrentActions))
+		for _, action := range o.ConcurrentActions {
+			s.concurrent[action] = true
+		}
+	}
+	s.ctx, s.cancel = context.WithCancel(context.WithValue(ctx, binaryKey{}, s))
 	defer s.cancel()
 	ho := o.Host
 	ho.Done = s.ctx.Done()
@@ -124,6 +156,9 @@ func Serve(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, o Opt
 
 func (s *server) loop(stdin io.Reader) error {
 	r := bufio.NewReaderSize(stdin, 64*1024)
+	if s.framed() {
+		return s.frameLoop(r)
+	}
 	for {
 		line, overlong, err := s.readLine(r)
 		if overlong {
@@ -206,13 +241,21 @@ func (s *server) readLine(r *bufio.Reader) (line []byte, overlong bool, err erro
 	}
 }
 
-// write sends one line unless the transport finished. Caller holds s.mu.
+// write sends one message (a line, or a JSON frame on the framed transport)
+// unless the transport finished. Caller holds s.mu.
 func (s *server) writeLocked(line []byte) error {
+	if s.framed() {
+		return s.writeRawLocked(encodeJSONFrame(line))
+	}
+	b := make([]byte, 0, len(line)+1)
+	return s.writeRawLocked(append(append(b, line...), '\n'))
+}
+
+// writeRawLocked writes already-encoded bytes. Caller holds s.mu.
+func (s *server) writeRawLocked(b []byte) error {
 	if s.finished || s.writeErr != nil {
 		return errWrite
 	}
-	b := make([]byte, 0, len(line)+1)
-	b = append(append(b, line...), '\n')
 	if _, err := s.out.Write(b); err != nil {
 		s.writeErr = errWrite
 		s.cancel()
@@ -347,15 +390,45 @@ func (s *server) handleLine(line []byte) bool {
 	case "plugin.initialize":
 		var p struct {
 			Features struct {
-				Tasks json.RawMessage `json:"tasks"`
+				Tasks           json.RawMessage `json:"tasks"`
+				TaskEvents      json.RawMessage `json:"taskEvents"`
+				Configuration   json.RawMessage `json:"configuration"`
+				DatabaseDrivers json.RawMessage `json:"databaseDrivers"`
 			} `json:"features"`
 		}
 		_ = json.Unmarshal(params, &p)
 		s.mu.Lock()
+		first := !s.initialized
 		s.initialized = true
 		s.negotiated = s.tasks != nil && string(p.Features.Tasks) == "1"
-		s.replyLocked(id, s.initializeResult(s.negotiated), nil)
+		s.taskEvents = s.negotiated && !s.tasks.o.DisableEvents && string(p.Features.TaskEvents) == "1"
+		s.configuration = s.o.OnConfigurationChanged != nil && string(p.Features.Configuration) == "1"
+		s.database = s.o.Database != nil && string(p.Features.DatabaseDrivers) == "1"
+		var result json.RawMessage
+		if s.database {
+			result = s.initializeResultDatabase(s.negotiated, s.configuration)
+		} else {
+			result = s.initializeResultFeatures(s.negotiated, s.configuration)
+		}
+		if s.taskEvents {
+			result = withTaskEvents(result, s.o.Style == StyleSorted)
+		}
+		if identity := s.identity(); identity != nil {
+			result = withIdentity(result, identity)
+		}
+		s.replyLocked(id, result, nil)
 		s.mu.Unlock()
+		if first && s.o.OnInitialize != nil {
+			go s.o.OnInitialize(s.ctx, s.host)
+		}
+		if first && len(s.o.Events) > 0 && s.o.OnEvent != nil {
+			events := append([]string(nil), s.o.Events...)
+			go func() {
+				if _, err := host.SubscribeEvents(s.ctx, s.host, events); err != nil && s.errOut != nil {
+					_, _ = io.WriteString(s.errOut, "plugin event subscription failed\n")
+				}
+			}()
+		}
 	case "plugin.ping":
 		s.mu.Lock()
 		s.replyLocked(id, s.initializeResult(false), nil)
@@ -365,6 +438,12 @@ func (s *server) handleLine(line []byte) bool {
 		return true
 	case "plugin.invoke":
 		s.invoke(id, params)
+	case "plugin.call":
+		s.pluginCall(id, params)
+	case "plugin.configuration.changed":
+		s.configurationChanged(id, params)
+	case "plugin.event":
+		s.hostEvent(id, params)
 	case "plugin.task.start", "plugin.task.status", "plugin.task.cancel":
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -382,6 +461,10 @@ func (s *server) handleLine(line []byte) bool {
 			s.taskLookupLocked(id, params, method == "plugin.task.cancel")
 		}
 	default:
+		if strings.HasPrefix(method, "plugin.db.") {
+			s.databaseCall(id, method, params)
+			return false
+		}
 		e := NewError(CodeMethodNotFound, s.o.MethodNotFound)
 		if strings.HasPrefix(method, "plugin.task.") && s.tasks == nil {
 			e = s.noTasksError()
@@ -602,38 +685,148 @@ func (s *server) normalizePayload(raw json.RawMessage) (json.RawMessage, *Error)
 	return nil, s.o.PayloadNotObject
 }
 
+// admission is the outcome of validateInvokeLocked.
+type admission struct {
+	invokeParams
+	// concurrent: a ConcurrentActions action, run outside the MaxInflight gate.
+	concurrent bool
+	// wait: the gate is full but the invoke may queue (Options.BusyWait).
+	wait bool
+}
+
 // validateInvoke runs the shared admission checks (busy, params, action,
-// payload). Caller holds s.mu.
-func (s *server) validateInvokeLocked(params json.RawMessage) (invokeParams, *Error) {
-	var p invokeParams
+// payload). queue allows a full MaxInflight gate to report wait instead of
+// Busy. Caller holds s.mu.
+func (s *server) validateInvokeLocked(params json.RawMessage, queue bool) (admission, *Error) {
+	var a admission
 	var perr *Error
-	if s.o.ParamsBeforeBusy {
-		if p, perr = s.parseParams(params); perr != nil {
-			return p, perr
+	// The action name decides the gate when some actions are concurrent.
+	parseFirst := s.o.ParamsBeforeBusy || s.concurrent != nil
+	if parseFirst {
+		if a.invokeParams, perr = s.parseParams(params); perr != nil {
+			return a, perr
+		}
+		a.concurrent = s.concurrent[a.action]
+	}
+	switch {
+	case a.concurrent:
+		if s.concurrentInflight >= s.o.MaxConcurrent {
+			return a, s.o.Busy
+		}
+	case s.inflight >= s.o.MaxInflight:
+		if !queue || s.o.BusyWait <= 0 || len(s.waiters) >= s.o.MaxQueued {
+			return a, s.o.Busy
+		}
+		a.wait = true
+	}
+	if !parseFirst {
+		if a.invokeParams, perr = s.parseParams(params); perr != nil {
+			return a, perr
 		}
 	}
-	if s.inflight >= s.o.MaxInflight {
-		return p, s.o.Busy
+	if s.o.KnownAction != nil && !s.o.KnownAction(a.action) {
+		return a, s.o.UnknownAction(a.action)
 	}
-	if !s.o.ParamsBeforeBusy {
-		if p, perr = s.parseParams(params); perr != nil {
-			return p, perr
-		}
-	}
-	if s.o.KnownAction != nil && !s.o.KnownAction(p.action) {
-		return p, s.o.UnknownAction(p.action)
-	}
-	payload, perr := s.normalizePayload(p.payload)
+	payload, perr := s.normalizePayload(a.payload)
 	if perr != nil {
-		return p, perr
+		return a, perr
 	}
-	p.payload = payload
+	a.payload = payload
 	if s.o.Admit != nil {
-		if e := s.o.Admit(p.action, p.payload); e != nil {
-			return p, e
+		if e := s.o.Admit(a.action, a.payload); e != nil {
+			return a, e
 		}
 	}
-	return p, nil
+	return a, nil
+}
+
+// acquireLocked takes a slot (gate or concurrent). Caller holds s.mu.
+func (s *server) acquireLocked(concurrent bool) {
+	if concurrent {
+		s.concurrentInflight++
+	} else {
+		s.inflight++
+	}
+}
+
+// releaseLocked frees a slot taken by acquireLocked. A gate slot goes
+// straight to the oldest queued invoke, if any. Caller holds s.mu.
+func (s *server) releaseLocked(concurrent bool) {
+	if concurrent {
+		s.concurrentInflight--
+		return
+	}
+	if len(s.waiters) > 0 && !s.replyStopped {
+		next := s.waiters[0]
+		s.waiters = s.waiters[1:]
+		close(next) // the slot now belongs to that waiter
+		return
+	}
+	s.inflight--
+}
+
+// removeWaiterLocked drops a queued invoke and reports whether it was still
+// queued (false: a slot was already handed to it). Caller holds s.mu.
+func (s *server) removeWaiterLocked(ch chan struct{}) bool {
+	for i, w := range s.waiters {
+		if w == ch {
+			s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// configurationChanged acknowledges plugin.configuration.changed and runs the
+// callback outside the read loop. Without a negotiated feature the method is
+// unknown, as before.
+func (s *server) configurationChanged(id json.RawMessage, params json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.configuration {
+		s.replyLocked(id, nil, NewError(CodeMethodNotFound, s.o.MethodNotFound))
+		return
+	}
+	var p struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		s.replyLocked(id, nil, NewError(CodeInvalidParams, "invalid configuration change params"))
+		return
+	}
+	s.replyLocked(id, json.RawMessage(`{}`), nil)
+	callback := s.o.OnConfigurationChanged
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		callback(s.ctx, p.Keys, s.host)
+	}()
+}
+
+// hostEvent acknowledges plugin.event and runs OnEvent outside the read loop.
+// Without OnEvent the method is unknown.
+func (s *server) hostEvent(id json.RawMessage, params json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.o.OnEvent == nil || !s.initialized {
+		s.replyLocked(id, nil, NewError(CodeMethodNotFound, s.o.MethodNotFound))
+		return
+	}
+	var p struct {
+		Event string          `json:"event"`
+		Data  json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Event == "" {
+		s.replyLocked(id, nil, NewError(CodeInvalidParams, "invalid host event params"))
+		return
+	}
+	s.replyLocked(id, json.RawMessage(`{}`), nil)
+	callback := s.o.OnEvent
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		callback(s.ctx, p.Event, p.Data, s.host)
+	}()
 }
 
 func (s *server) invoke(id json.RawMessage, params json.RawMessage) {
@@ -643,30 +836,68 @@ func (s *server) invoke(id json.RawMessage, params json.RawMessage) {
 		s.replyLocked(id, nil, s.o.NotInitialized)
 		return
 	}
-	p, perr := s.validateInvokeLocked(params)
+	a, perr := s.validateInvokeLocked(params, true)
 	if perr != nil {
 		s.replyLocked(id, nil, perr)
 		return
 	}
-	s.inflight++
+	if a.wait {
+		s.queueInvokeLocked(id, a.invokeParams)
+		return
+	}
+	s.acquireLocked(a.concurrent)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		result, err := s.call(s.ctx, p.action, p.payload)
-		var rerr *Error
-		var raw json.RawMessage
-		if err != nil {
-			rerr = s.mapError(err)
-		} else if raw, err = s.marshalResult(result); err != nil || !json.Valid(raw) || (s.o.MaxResultBytes > 0 && len(raw) > s.o.MaxResultBytes) {
-			rerr = s.o.ResultTooLarge
+		s.runInvoke(id, a.invokeParams, a.concurrent)
+	}()
+}
+
+// queueInvokeLocked waits up to BusyWait for a MaxInflight slot in its own
+// goroutine, then runs the invoke or answers Busy. Caller holds s.mu.
+func (s *server) queueInvokeLocked(id json.RawMessage, p invokeParams) {
+	ready := make(chan struct{})
+	s.waiters = append(s.waiters, ready)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		timer := time.NewTimer(s.o.BusyWait)
+		defer timer.Stop()
+		select {
+		case <-ready:
+		case <-timer.C:
+		case <-s.ctx.Done():
 		}
 		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.inflight--
-		if !s.replyStopped {
-			s.replyLocked(id, raw, rerr)
+		if s.removeWaiterLocked(ready) {
+			if !s.replyStopped {
+				s.replyLocked(id, nil, s.o.Busy)
+			}
+			s.mu.Unlock()
+			return
 		}
+		s.mu.Unlock()
+		s.runInvoke(id, p, false)
 	}()
+}
+
+// runInvoke runs one admitted invoke (its slot already taken), replies and
+// releases the slot.
+func (s *server) runInvoke(id json.RawMessage, p invokeParams, concurrent bool) {
+	result, err := s.call(s.ctx, p.action, p.payload)
+	var rerr *Error
+	var raw json.RawMessage
+	if err != nil {
+		rerr = s.mapError(err)
+	} else if raw, err = s.marshalResult(result); err != nil || !json.Valid(raw) || (s.o.MaxResultBytes > 0 && len(raw) > s.o.MaxResultBytes) {
+		rerr = s.o.ResultTooLarge
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseLocked(concurrent)
+	if !s.replyStopped {
+		s.replyLocked(id, raw, rerr)
+	}
 }
 
 // call runs the handler with the host caller attached, converting panics.
@@ -717,9 +948,89 @@ func (s *server) waitDrain() {
 	}
 }
 
+// databaseCall admits one plugin.db.* request in the read loop and runs its
+// work in a goroutine, so plugin.ping and plugin.db.cancel are answered while
+// queries run. Without a negotiated feature the method is unknown.
+func (s *server) databaseCall(id json.RawMessage, method string, params json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.database {
+		s.replyLocked(id, nil, NewError(CodeMethodNotFound, s.o.MethodNotFound))
+		return
+	}
+	work, perr := s.o.Database.StartDatabaseCall(s.ctx, method, params)
+	if perr != nil {
+		s.replyLocked(id, nil, perr)
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		result, err := s.runDatabase(work)
+		var rerr *Error
+		var raw json.RawMessage
+		if err != nil {
+			rerr = s.mapError(err)
+		} else if raw, err = s.marshalResult(result); err != nil || !json.Valid(raw) {
+			rerr = s.o.ResultTooLarge
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !s.replyStopped {
+			if rerr == nil && s.replyResultFastLocked(id, raw) {
+				return
+			}
+			s.replyLocked(id, raw, rerr)
+		}
+	}()
+}
+
+// replyResultFastLocked writes a database result reply without re-encoding
+// the (already json.Valid) result: database pages are up to 512 KiB of
+// compact JSON built by dbdriver, and re-formatting them through
+// encoding/json was a full extra pass per page. It applies only to StyleGo
+// without HTML escaping, where the encoder would at most drop insignificant
+// whitespace, and only when the result has no line break (valid JSON carries
+// those only as whitespace), so the reply stays one valid line. Otherwise it
+// reports false and replyLocked handles the reply. Caller holds s.mu.
+func (s *server) replyResultFastLocked(id, result json.RawMessage) bool {
+	if s.o.Style != StyleGo || s.o.EscapeHTML || bytes.ContainsAny(result, "\r\n") {
+		return false
+	}
+	encodedID, err := encodeJSON(id, false)
+	if err != nil {
+		return false
+	}
+	const head, mid = `{"jsonrpc":"2.0","id":`, `,"result":`
+	size := len(head) + len(encodedID) + len(mid) + len(result) + 1
+	if s.o.MaxReplyBytes > 0 && size+1 > s.o.MaxReplyBytes {
+		return false
+	}
+	line := make([]byte, 0, size)
+	line = append(line, head...)
+	line = append(line, encodedID...)
+	line = append(line, mid...)
+	line = append(line, result...)
+	line = append(line, '}')
+	_ = s.writeLocked(line)
+	return true
+}
+
+func (s *server) runDatabase(work func() (any, error)) (result any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result, err = nil, &panicError{r}
+		}
+	}()
+	return work()
+}
+
 func (s *server) closeAll() {
 	s.closeOnce.Do(func() {
 		s.host.Close(false)
+		if s.o.Database != nil {
+			s.o.Database.CloseDatabase()
+		}
 		if s.o.OnClose != nil {
 			s.o.OnClose()
 		}

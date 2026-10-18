@@ -56,17 +56,30 @@ func NodeDefaults() Options {
 	}
 }
 
-// Main serves stdin/stdout until EOF, plugin.shutdown or SIGINT/SIGTERM and
-// exits with status 1 (after writing Options.FatalMessage) when the
-// transport failed.
+// Main serves the process's standard input and output until EOF,
+// plugin.shutdown or SIGINT/SIGTERM and exits with status 1 (after writing
+// Options.FatalMessage) when the transport failed. Before serving it points
+// os.Stdin at the null device and os.Stdout at os.Stderr, so libraries can
+// neither consume nor corrupt protocol frames.
 func Main(o Options) {
+	in, out := takeStdio()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	go func() { <-ctx.Done(); _ = os.Stdin.Close() }()
-	err := Serve(ctx, os.Stdin, os.Stdout, os.Stderr, o)
+	go func() { <-ctx.Done(); _ = in.Close() }()
+	err := Serve(ctx, in, out, os.Stderr, o)
 	stop()
 	if err != nil {
 		os.Exit(1)
 	}
+}
+
+// takeStdio returns the process's standard input and output and points
+// os.Stdin at the null device (nil if it cannot be opened, so reads fail)
+// and os.Stdout at os.Stderr.
+func takeStdio() (in, out *os.File) {
+	in, out = os.Stdin, os.Stdout
+	os.Stdin, _ = os.Open(os.DevNull)
+	os.Stdout = os.Stderr
+	return in, out
 }
 
 func hostOptions(prefix string) host.Options {

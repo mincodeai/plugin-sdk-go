@@ -153,6 +153,16 @@ func (c *Client) Encode(id, method string, params any) ([]byte, error) {
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
+type callTimeoutKey struct{}
+
+// WithCallTimeout makes calls made with the returned context wait up to d for
+// the host's reply instead of the client's default timeout. Use it for host
+// methods that wait for the user (host.quickPick, host.inputBox,
+// host.plugins.invoke); the helpers in this package already do.
+func WithCallTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, callTimeoutKey{}, d)
+}
+
 // Call implements Caller.
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
@@ -182,7 +192,11 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 	if err := c.send(line); err != nil && !c.o.SendErrorIgnored {
 		return nil, c.o.Unavailable
 	}
-	timer := time.NewTimer(c.o.Timeout)
+	wait := c.o.Timeout
+	if d, ok := ctx.Value(callTimeoutKey{}).(time.Duration); ok && d > 0 {
+		wait = d
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	done := c.o.Done
 	select {

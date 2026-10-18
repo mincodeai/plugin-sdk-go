@@ -24,6 +24,12 @@ type task struct {
 	Error           string          `json:"error,omitempty"`
 	cancel          context.CancelFunc
 	finished        time.Time
+	// concurrent: a ConcurrentActions action holding a concurrent slot
+	// instead of the shared gate (SharedGate only).
+	concurrent bool
+	// lastEvent and eventTimer throttle progress notifications.
+	lastEvent  time.Time
+	eventTimer *time.Timer
 }
 
 type taskTable struct {
@@ -79,6 +85,9 @@ func newTaskTable(o *TaskOptions) *taskTable {
 	}
 	if d.ResultTooLarge == "" {
 		d.ResultTooLarge = "Task result exceeds limit"
+	}
+	if d.TaskEventInterval <= 0 {
+		d.TaskEventInterval = 100 * time.Millisecond
 	}
 	return t
 }
@@ -159,12 +168,14 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 	t.pruneLocked()
 	var taskID string
 	var p invokeParams
+	concurrent := false
 	if t.o.SharedGate {
-		var perr *Error
-		if p, perr = s.validateInvokeLocked(params); perr != nil {
+		a, perr := s.validateInvokeLocked(params, false)
+		if perr != nil {
 			s.replyLocked(id, nil, perr)
 			return
 		}
+		p, concurrent = a.invokeParams, a.concurrent
 		var q struct {
 			TaskID any `json:"taskId"`
 		}
@@ -232,7 +243,7 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 		s.replyLocked(id, nil, t.o.Busy)
 		return
 	}
-	x := &task{ID: taskID, State: "running"}
+	x := &task{ID: taskID, State: "running", concurrent: concurrent}
 	var run TaskFunc
 	prepare := t.o.Prepare
 	if t.o.Start != nil {
@@ -260,6 +271,7 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 			defer s.mu.Unlock()
 			if x.State == "running" {
 				x.CancelRequested = true
+				s.taskChangedLocked(x)
 			}
 		})
 		stop := cancel
@@ -271,7 +283,7 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 	t.tasks[taskID] = x
 	t.running++
 	if t.o.SharedGate {
-		s.inflight++
+		s.acquireLocked(concurrent)
 	}
 	s.replyLocked(id, t.snapshot(x), nil)
 	report := func(v any) {
@@ -282,6 +294,7 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 		s.mu.Lock()
 		if x.State == "running" {
 			x.Progress = b
+			s.taskChangedLocked(x)
 		}
 		s.mu.Unlock()
 	}
@@ -302,11 +315,12 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 			defer s.mu.Unlock()
 			t.running--
 			if t.o.SharedGate {
-				s.inflight--
+				s.releaseLocked(x.concurrent)
 			}
 			x.finished = time.Now()
 			x.State, x.Result, x.Error = tr.State, tr.Result, tr.Error
 			x.CancelRequested = x.CancelRequested || tr.CancelRequested
+			s.taskChangedLocked(x)
 			return
 		}
 		var raw json.RawMessage
@@ -320,9 +334,10 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 		defer s.mu.Unlock()
 		t.running--
 		if t.o.SharedGate {
-			s.inflight--
+			s.releaseLocked(x.concurrent)
 		}
 		x.finished = time.Now()
+		defer s.taskChangedLocked(x)
 		switch {
 		case errors.Is(err, errTaskResult):
 			x.State, x.Error = "failed", t.o.ResultTooLarge
@@ -364,4 +379,44 @@ func (t *taskTable) clip(msg string) string {
 		return msg[:t.o.MaxErrorBytes]
 	}
 	return msg
+}
+
+// taskChangedLocked sends plugin.task.changed {"taskId"} once taskEvents was
+// negotiated: right away for a terminal state, and at most every
+// TaskEventInterval while the task runs (a trailing notification covers the
+// last change in a burst). It is a hint only; the host reads the snapshot
+// with plugin.task.status. Caller holds s.mu.
+func (s *server) taskChangedLocked(x *task) {
+	if !s.taskEvents || s.replyStopped {
+		return
+	}
+	if x.State == "running" {
+		if x.eventTimer != nil {
+			return // a trailing notification is already scheduled
+		}
+		if wait := s.tasks.o.TaskEventInterval - time.Since(x.lastEvent); wait > 0 {
+			x.eventTimer = time.AfterFunc(wait, func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				x.eventTimer = nil
+				if x.State == "running" {
+					s.taskChangedLocked(x)
+				}
+			})
+			return
+		}
+	} else if x.eventTimer != nil {
+		x.eventTimer.Stop()
+		x.eventTimer = nil
+	}
+	x.lastEvent = time.Now()
+	id, err := encodeJSON(x.ID, false)
+	if err != nil {
+		return
+	}
+	line := make([]byte, 0, len(id)+80)
+	line = append(line, `{"jsonrpc":"2.0","method":"plugin.task.changed","params":{"taskId":`...)
+	line = append(line, id...)
+	line = append(line, "}}"...)
+	_ = s.writeLocked(line)
 }

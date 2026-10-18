@@ -46,6 +46,8 @@ devkit 导出时另附 `sdk/go`（同样的副本）和 `tools/sync-go-sdk.mjs`�
 | `jsvalue` | 从 Node 运行时移植来的插件用的 JS 语义值：保序对象 `Obj`、`Parse`（JSON.parse）、`Stringify`（JSON.stringify，数字格式与 U+2028 保持 JS 行为）、UTF-16 长度/切片、JS 空白与真值规则 |
 | `profiles` | 版本化配置档文档 `Store`（`{"version":1,"profiles":[...]}`）、按字段记忆的凭据 `Secrets`（`profile.<id>.<field>`）、宿主错误分类 `Classify` |
 | `rpctest` | golden 对话格式 `Parse` / `Format`、逐字节回放 `Replay`、内存宿主 `FakeHost`（插件单元测试用） |
+| `dbdriver` | 数据库驱动插件协议 v1（`plugin.db.*`）：`Driver` / `Conn` 接口与可选的 `MetadataProvider`、`TableRowsProvider`、`Mutator`、`Destroyer`，协议服务端 `Server`（接到 `rpc.Options.Database`），永不打印的 `Secret`，`database/sql` 适配器 `FromSQL` |
+| `dbdriver/dbdrivertest` | 驱动测试工具：管道宿主 `Start` / `Client`、契约检查 `CheckDriver`、可编排的 `database/sql` 假驱动 `FakeSQL` |
 
 录制工具与 golden 回放测试不在本模块内：它们放在仓库的 `packages/plugin-sdk-go-conformance/`（独立模块，不对外发布），以免把约 750 KB 的测试数据带进 `go get` 下载的包。
 
@@ -74,13 +76,15 @@ func handle(ctx context.Context, action string, payload json.RawMessage) (any, e
 ```
 
 - `Handler(ctx, action, payload)`：返回 `json.RawMessage` / `[]byte` 原样写出，其它值按回复风格序列化；返回 `*rpc.Error` 精确控制 code/message，其它错误经 `MapError`（默认 `-32000 err.Error()`）。panic 回复 `PanicError`。
-- `Serve(ctx, stdin, stdout, stderr, o)` 可直接在测试里驱动；`Main(o)` 处理 SIGINT/SIGTERM，传输失败时写 `FatalMessage` 并以 1 退出。
-- 任务：`o.Tasks = &rpc.TaskOptions{...}` 且宿主在 `plugin.initialize` 协商 `features.tasks=1` 后启用 `plugin.task.start/status/cancel`；handler 内用 `rpc.ReportProgress(ctx, v)` 报告进度。
+- `Serve(ctx, stdin, stdout, stderr, o)` 可直接在测试里驱动；`Main(o)` 处理 SIGINT/SIGTERM，传输失败时写 `FatalMessage` 并以 1 退出。服务期间 `os.Stdin` 读空设备、`os.Stdout` 指向 `os.Stderr`，依赖库读不到也写不乱协议帧；包级 `init()` 早于 `Main` 运行，不在此保护范围内。
+- 任务：`o.Tasks = &rpc.TaskOptions{...}` 且宿主在 `plugin.initialize` 协商 `features.tasks=1` 后启用 `plugin.task.start/status/cancel`；handler 内用 `rpc.ReportProgress(ctx, v)` 报告进度。宿主同时提供 `features.taskEvents=1` 时 SDK 自动回显，并在任务结束（立即）或报告进度（每个任务最多每 `TaskEventInterval`，默认 100 ms）时发送通知 `plugin.task.changed {"taskId"}`，宿主据此立即读取状态而不必等下一次轮询；`TaskOptions.DisableEvents` 可关闭。
+- 并发：未声明的 action 由 `MaxInflight`（默认 1）串行，满时立即回 `Busy`（`-32029`）。只读、没有未加锁共享状态、审计过的 action 可列入 `ConcurrentActions`，绕过该闸门（含 `SharedGate` 任务），由 `MaxConcurrent`（默认 16）限制；声明后先解析 params 再判断闸门（相当于 `ParamsBeforeBusy`）。`BusyWait`（默认 0）> 0 时闸门已满的 invoke 先按到达顺序排队等待槽位（最多 `MaxQueued`，默认 16），超时才回 `Busy`；任务启动从不排队。官方插件只能把清单里 `risk: "read"` 的 action 声明为并发。
 - 主要开关（完整说明见 `rpc/options.go` 注释）：
   - 分帧：`MaxLineBytes`、`OverlongFatal`、`StrictJSON`、`RequireVersion`、`DecodeEnvelope`（自定义请求信封解码，如旧的 DisallowUnknownFields 结构体）、`Invalid` / `InvalidMessage` / `InvalidOmitID`（`-32700` 回复不带 id 成员）、`SkipEmptyLines` / `SkipBlankLines`、`NonStringMethod`、`IDs` / `MaxIDBytes`
   - 回复：`Style`（`StyleGo` / `StyleSorted` / `StyleJS`）、`EscapeHTML`
   - 方法：`MethodNotFound`、`RequireInitialize` / `NotInitialized`、`TasksNotNegotiated`、`RejectTaskMethods`
-  - invoke：`MaxInflight` / `Busy`、`ParamsBeforeBusy`、`Payload`（`PayloadString` / `PayloadObject`）、`KeepEmptyPayload`（`PayloadString` 下空 payload 原样交给 handler，不补成 `{}`）、`InvalidParams`、`KnownAction` / `UnknownAction`、`PayloadNotObject` / `PayloadInvalidJSON`、`MaxResultBytes` / `ResultTooLarge`、`MapError`、`PanicError`
+  - 后台访问宿主：`OnInitialize func(ctx, host.Caller)` 在首次 `plugin.initialize` 回复后于独立 goroutine 中运行一次，得到的 `Caller` 在传输停止前都可用于 invoke 之外的后台工作（例如启动时建立的长连接）；`ctx` 随 `Serve` 返回结束
+  - invoke：`MaxInflight` / `Busy`、`ConcurrentActions` / `MaxConcurrent`、`BusyWait` / `MaxQueued`、`ParamsBeforeBusy`、`Payload`（`PayloadString` / `PayloadObject`）、`KeepEmptyPayload`（`PayloadString` 下空 payload 原样交给 handler，不补成 `{}`）、`InvalidParams`、`KnownAction` / `UnknownAction`、`PayloadNotObject` / `PayloadInvalidJSON`、`MaxResultBytes` / `ResultTooLarge`、`MapError`、`PanicError`
   - 生命周期：`DrainReplies` / `DrainTimeout`、`OnClose`
   - 反向请求：`Host`（`host.Options`）
 - `PassHostErrors`：把 `*host.Error` 原样（宿主 code + message）作为回复，Node 家族默认使用。
@@ -101,6 +105,24 @@ func handle(ctx context.Context, action string, payload json.RawMessage) (any, e
 ### host
 
 `Client` 由 `rpc.Serve` 创建并通过 ctx 注入，插件只需 `host.FromContext(ctx).Call(ctx, method, params)`，得到原始 JSON 结果（无结果时为 `null`）或 `*host.Error`（`-32001` 未授权、`-32002` 存储/凭据失败、`-32003` 宿主不支持反向请求）。超时默认 10 s（`context.DeadlineExceeded`，可用 `TimeoutError` 替换）；传输关闭后返回 `Unavailable`（默认 `host.ErrUnavailable`）。`Options.SortKeys` / `EscapeHTML` / `MaxLineBytes` 复现不同插件的请求字节。
+
+AI 回合（清单能力 `ai`，API v2）：`host.StartAITurn` / `PollAITurn` / `CancelAITurn` 把一条消息交给桌面端 AI 助手回答，轮询得到的 `AITurnState.Text` 是截至目前的完整回答（不是增量），`Done` 为 true 时结束；语义与限制见 `docs/architecture/plugin-system.md`。
+`host.CompleteAITurn(ctx, c, req, poll, partial)` 封装启动→轮询→结束（ctx 取消时同时取消回合），返回最终文本；`host.ClassifyAIError(err)` 把限流、并发上限、缺能力、宿主不支持、回合失败等归为 `AIErrorKind`，便于插件显示本地化提示。官方插件页面用 `@mincode/plugin-ui/tasks.mjs` 的 `runAIAction` 以任务方式调用这类动作（见 `docs/development/plugin-development.md` 5.3 节）。
+
+状态栏（`contributes.statusBar`，能力 `commands`，API v2）：`host.UpdateStatusBarItem(ctx, c, host.StatusBarUpdate{ID, Text, Tooltip, Severity, Busy, Visible})` 更新声明为 `"dynamic": true` 的条目（nil 字段保持原值），`host.ResetStatusBar(ctx, c, id)` 恢复单个条目，`id` 为空时恢复全部。宿主合并推送（最新值生效）、超过 50 次/秒的更新静默丢弃，插件停止/崩溃/禁用/重载/卸载时清空动态状态。
+
+其余宿主能力都有同名封装（全部在 `host` 包，`c` 为 nil 时返回 `ErrUnavailable`）：
+
+| 能力 | 函数 |
+| --- | --- |
+| `storage` | `GetStorage` / `SetStorage` / `DeleteStorage` / `ListStorageKeys`；文件存储 `ReadStorageFile` / `WriteStorageFile`（宿主支持 staged 写入时超过 64 KiB 的整文件替换走 begin/append/commit，原子且线性、512 KiB 分块；旧宿主回退为 64 KiB 逐块直写，多块整体非原子）/ `WriteStorageFileAtomic`（始终原子，旧宿主上多块数据返回 `ErrStagedWriteUnsupported`）/ `DeleteStorageFile` / `ListStorageFiles` / `StatStorageFile` |
+| `secrets` | `GetSecret` / `SetSecret` / `DeleteSecret` / `ListSecrets` |
+| `shell` | `Exec(ctx, c, command, ShellOptions{Cwd, TimeoutSecs})`，非零退出码体现在 `ShellResult` 里而不是 error |
+| `commands` | `SetContext`（供 `when` 表达式使用的内存上下文） |
+| `workspace.read` / `workspace.write` | `WorkspaceRoot` / `ListWorkspace` / `StatWorkspace` / `ReadWorkspaceFile` / `WriteWorkspaceFile(ctx, c, path, data, WorkspaceWriteOptions{ExpectedSHA256, CreateOnly, CreateParents})`；`WorkspaceErrorCode(err)` 取出 `no_root`、`not_found`、`denied`、`conflict`、`too_large` 等机器可读错误码 |
+| 无 | `HostInfo`、`Describe`（`Description.Available(method)` 做特性检测）、`Log`、`SubscribeEvents` |
+
+工作区路径相对当前工作区根目录；VCS 内部目录与凭据文件永远不可见，写入还排除 `node_modules`、`.mincode`，单次写入整文件原子替换且不超过 512 KiB。宿主事件：在 `rpc.Options` 里设置 `Events: []string{host.EventFileSaved, ...}` 与 `OnEvent func(ctx, event, data json.RawMessage, h)`，SDK 在首次 `plugin.initialize` 后自动订阅，确认 `plugin.event` 后在独立 goroutine 中回调；携带路径的事件需要 `workspace.read`。事件只送达运行中的插件，不会启动插件，也不会重放。
 
 ### jsonx
 
@@ -154,6 +176,43 @@ n, err := creds.Forget(ctx, liveIDs, true)       // 清理不在 liveIDs 中的�
 ```
 
 输入中的 `@@PAD<n>@@` 展开为 n 个 `x`，超长帧无需原样存储。`rpctest.Replay(t, transcript, serveFunc)` 回放；`rpctest.NewFakeHost()` 是实现了 `host.storage.*` / `host.secrets.*` 的内存宿主，`fh.Context(ctx)` 后可直接单测 handler，`fh.Fail` 注入错误，`fh.Calls` 记录调用。
+
+### dbdriver
+
+声明 `database.driver` 能力并在清单 `contributes.databaseDrivers` 里贡献驱动的插件，用 `dbdriver` 实现协议 v1（`docs/architecture/database-driver-protocol.md`）。驱动作者只写连接与查询；分页、游标、取消、超时、并发上限、单元格编码和关闭都由 `Server` 负责：
+
+```go
+func main() {
+	o := rpc.StrictDefaults("clickhouse-driver")
+	o.FatalMessage = "clickhouse driver transport failed"
+	o.Database = dbdriver.NewServer(map[string]dbdriver.Driver{
+		"clickhouse": dbdriver.DriverFunc(connect), // 键 = contributes.databaseDrivers[].id
+	}, dbdriver.ServerOptions{})
+	rpc.Main(o) // 只做数据库驱动时可以不设 Handler
+}
+
+func connect(ctx context.Context, cfg dbdriver.Config) (dbdriver.Conn, dbdriver.ConnInfo, error) {
+	client, err := open(ctx, cfg.Host, cfg.Port, cfg.Username, cfg.Password.Reveal()) // 只在交给客户端时 Reveal
+	if err != nil {
+		return nil, dbdriver.ConnInfo{}, err // 默认 kind connection
+	}
+	return &conn{client}, dbdriver.ConnInfo{ServerVersion: client.Version(), DefaultDatabase: cfg.Database}, nil
+}
+```
+
+- 协商：宿主在 `plugin.initialize` 提供 `features.databaseDrivers:1` 且设置了 `Options.Database` 时，回复里回显该特性并附 `"databaseDrivers":{"protocol":1,"minor":1,"drivers":[…],"pageLimits":{"maxRows":5000,"maxBytes":2097152}}`（协议 1.1，驱动 id 排序；`ServerOptions.ProtocolV10` 只宣告 `{"protocol":1,"drivers":[…]}`）；未协商时 `plugin.db.*` 一律 `-32601`。`Options.Database` 为 nil 时所有既有输出逐字节不变。
+- `Conn`：`Execute(ctx, ExecuteRequest) (*Result, error)` 与 `Close()`，必须可并发调用。`Result.Rows` 是只进的 `Rows`（`Columns()`、`Next(ctx)` 结束返回 `io.EOF`、`Close()`；预读时 `Next` 会在不同 goroutine 中被调用，但从不并发），没有结果集时填 `AffectedRows`。`ctx` 带语句超时并由 `plugin.db.cancel` 取消，它一直存活到 `Rows` 关闭，流式读取可以绑定它。`dbdriver.SliceRows` 包装内存结果。
+- 可选能力按接口发现，未实现即 `unsupported`：`MetadataProvider`（`navigation` 必须；`navigation` / `primaryKeys` / `ddl` 返回 `Value`，`tables` / `columns` / `indexes` / `foreignKeys` / `triggers` 返回 `Items`，用 `dbdriver.Items(list)` 转换，`Server` 按页预算分页）、`TableRowsProvider`（只读；`Result.NextPageToken` 放进回复的 `nextPageToken`）、`Mutator`（`updateCell` / `insertRow` / `deleteRow`，返回影响行数）、`Destroyer`（`dropTable` / `clearTable`，宿主已确认）。元数据 DTO（`SchemaInfo`、`ColumnInfo`、`PrimaryKeyInfo`、`IndexInfo`、`ForeignKeyInfo`、`TriggerInfo`）与宿主 `backend/db` 的 JSON 形状一致。
+- 分页：每页 ≤ min(`maxRows`, `pageMaxRows`) 行、≤ min(`maxBytes`, `pageMaxBytes`) 字节，`pageMaxRows` / `pageMaxBytes` 再夹到协议 1.1 上限 `MaxPageRows`（5000）/ `MaxPageBytes`（2 MiB）；1.1 宿主只对页回复放宽 1 MiB 行上限，1.0 宿主仍发 1000 行 / 512 KiB。设置了小于约 2 MiB 的 `rpc.Options.MaxReplyBytes` 的插件应设 `ProtocolV10`（页字节再夹到约 1 MiB），否则大页会变成 `ResultTooLarge`。元数据页始终 ≤ 约 1 MiB。多读一行判断 `done`，最后一页不带 `cursor`。单行超过页预算时结束结果并附 `notice`（`ServerOptions.OversizedRowNotice` 可改文案）。空闲游标 `cursorIdleMs`（默认 60 s）后关闭，`Rows.Close` 一定会被调用。
+- 预读：回复一页后，`Server` 在宿主处理这一页时读取并编码同一游标的下一页（最多一页加一行，行数 / 字节按刚回复的页预算），下一次 `fetch` 先用预读的行；预读中的 `fetch` 会等它结束。预读不占 16 个调用名额，但 `close` 会等待它；`closeCursor`、`cancel`、`close`、`plugin.shutdown` 会取消请求上下文，丢弃已读行并关闭 `Rows`；空闲计时在预读结束后才开始，过期时同样丢弃预读的行。预读遇到的驱动错误在下一次 `fetch` 返回。`ServerOptions.DisablePrefetch` 关闭预读。
+- 单元格编码：超过 ±2^53 的整数、`*big.Int`、`json.Number` 以字符串发送；`[]byte` 按字符串；`time.Time` 用 RFC 3339 纳秒；NaN/Inf 为字符串；`json.RawMessage`、`map[string]any`、`[]any` 保留结构（键排序，深度 > 16 的部分发送其 JSON 文本）；`driver.Valuer` 先取值；其它类型走 `encoding/json`。
+- 错误：返回 `*dbdriver.Error`（`dbdriver.Errorf(kind, …)`）选择 `data.kind`；其它错误在 `Connect` 中为 `connection`，其余为 `database`。上下文取消 / 超时 / 句柄关闭由 `Server` 判定为 `cancelled`（`query cancelled`）/ `timeout` / `cancelled`（`connection closed`）。`invalid` 用 `-32602`、`busy` 用 `-32029`，其余 `-32000`；消息里出现的本连接 `Password` / `Token` 会被替换成 `[redacted]` 并截断到 4096 字符。
+- 取消：`plugin.db.cancel` 在 `CancelWait`（默认 2 s）内调用结束则回 `confirmed`，否则 `requested`；空闲游标直接关闭并回 `confirmed`；未知 requestId 回 `notFound`。`cancel`、`close`、`closeCursor` 不受 16 个并发调用上限约束；超过上限回 `busy`，超过 32 个连接也回 `busy`。
+- 关闭：`plugin.db.close` 取消该句柄的调用、有限等待（`CloseWait`，默认 3 s）后关闭游标再 `Conn.Close()`；`plugin.shutdown` / EOF 时 `CloseDatabase` 关闭全部句柄。未知句柄的 `close` / `closeCursor` 回 `true`。
+- 凭据：`Config.Password` / `Config.Token` 是 `Secret`，`String`、`GoString`、所有 fmt 动词、`MarshalJSON`、`MarshalText`、slog 都输出 `[redacted]`；只有 `Reveal()` 返回明文。不要记录、打印或持久化 params 与凭据。
+- `database/sql`：`dbdriver.FromSQL(open, dbdriver.SQLOptions{…})` 用固定连接执行每条语句（结果关闭前不归还），`ReadOnlyTx` 让只读执行运行在只读事务里，`ReadOnlyContext` / `UseDatabase` / `IsQuery` / `Metadata` / `TableRows` / `Mutate` / `Destroy` 为可选钩子；列类型取 `DatabaseTypeName`。
+
+测试驱动：`dbdrivertest.CheckDriver(t, driver, dbdrivertest.Check{Query, WantRows, SlowQuery, BadQuery})` 走一遍宿主契约（连接、navigation、逐行分页、取消、错误、关闭）；`dbdrivertest.Start` 返回可 `Call` / `Send` 的宿主客户端；`FakeSQL` 是按语句编排结果、延迟或阻塞的内存 `database/sql` 驱动。协议 golden 对话 `tools/verify/fixtures/database-driver-protocol/*.jsonl` 由 `packages/plugin-sdk-go-conformance/golden/database` 回放。
 
 ## 官方插件预设表
 
@@ -245,3 +304,7 @@ golden 对话与回放测试位于 `packages/plugin-sdk-go-conformance/`（模�
 ## 许可证
 
 本 SDK 以 [Apache License 2.0](LICENSE) 发布。
+
+## 系统关联
+
+`system.associations` 的 ListAssociations / RequestAssociationSettings / ReadAssociatedFile 只服务声明的 externalOpenHandlers。设置始终由宿主确认，读取使用授权请求 ID，不能提供任意路径；最大 16 MiB、64 KiB 分块。参考 [插件开发指南](../../docs/development/plugin-development.md#系统文件与链接接管externalopenhandlers)。

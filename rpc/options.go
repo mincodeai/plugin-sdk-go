@@ -189,14 +189,58 @@ type Options struct {
 	// NotInitialized.
 	RequireInitialize bool
 	NotInitialized    *Error
+	// OnInitialize, when set, runs once in its own goroutine after the first
+	// plugin.initialize reply. The Caller stays usable until the transport
+	// stops, so background work (a long-lived connection, a poller) can call
+	// the host outside an invoke; ctx ends when Serve returns.
+	OnInitialize func(ctx context.Context, h host.Caller)
+	// OnConfigurationChanged, when set, negotiates features.configuration = 1
+	// in plugin.initialize and runs in its own goroutine for each
+	// plugin.configuration.changed request (after the empty reply). keys are
+	// the settings whose effective value changed; re-read them with
+	// host.GetConfiguration. Nil keeps the initialize result unchanged.
+	OnConfigurationChanged func(ctx context.Context, keys []string, h host.Caller)
+
+	// Events are host events (host.EventWorkspaceChanged, ...) subscribed right
+	// after the first plugin.initialize; they need OnEvent. Events carrying
+	// paths need the workspace.read capability.
+	Events []string
+	// OnEvent runs in its own goroutine for each plugin.event request, after
+	// the empty reply. data is the event payload. Nil answers plugin.event
+	// with method-not-found.
+	OnEvent func(ctx context.Context, event string, data json.RawMessage, h host.Caller)
 
 	// --- invoke ---
 
+	// Handler runs plugin.invoke actions. It is required unless Database is
+	// set; a database-driver-only plugin may omit it (every action then gets
+	// UnknownAction).
 	Handler Handler
 	// MaxInflight bounds concurrent invokes (and tasks when
-	// TaskOptions.SharedGate); excess requests get Busy.
+	// TaskOptions.SharedGate); excess requests get Busy (default 1: handlers
+	// that were never audited for concurrency run one at a time).
 	MaxInflight int
 	Busy        *Error
+	// ConcurrentActions lists actions whose handlers are safe to run at the
+	// same time as any other invoke or task of the plugin: read-only, and
+	// touching shared state only under their own synchronization. They bypass
+	// the MaxInflight gate (also the SharedGate of tasks) and are bounded by
+	// MaxConcurrent instead. Declaring one makes the action name known before
+	// the busy check, so params are validated first for every invoke (like
+	// ParamsBeforeBusy). Leave an action out unless its handler was audited.
+	ConcurrentActions []string
+	// MaxConcurrent bounds concurrently running ConcurrentActions (default 16);
+	// excess requests get Busy.
+	MaxConcurrent int
+	// BusyWait, when positive, queues an invoke that finds the MaxInflight
+	// gate full for up to this long (first come, first served) instead of
+	// answering Busy at once; it gets Busy only when no slot frees in time or
+	// MaxQueued invokes already wait. Every other admission check still runs
+	// first. Task starts never wait. Keep it well below the host's 30 s invoke
+	// timeout (for example 2 s).
+	BusyWait time.Duration
+	// MaxQueued bounds invokes waiting for a slot under BusyWait (default 16).
+	MaxQueued int
 	// ParamsBeforeBusy validates params before the busy check.
 	ParamsBeforeBusy bool
 	Payload          PayloadMode
@@ -237,6 +281,28 @@ type Options struct {
 	// releases whatever it acquired from its handler.
 	Admit func(action string, payload json.RawMessage) *Error
 
+	// --- plugin views, identity and transport (protocol_ext.go) ---
+
+	// Methods are the plugin.call methods its views may call directly with
+	// transport.request(method, params). They are view-only: no risk
+	// confirmation and never offered to AI, so writes belong in actions.
+	// params is the raw JSON value the view sent (null when omitted).
+	Methods map[string]MethodFunc
+	// Identity is reported in the plugin.initialize result so the host can
+	// reject an entry that belongs to another plugin. When nil, the ids
+	// injected at build time with -ldflags "-X
+	// github.com/mincodeai/plugin-sdk-go/rpc.BuildPluginID=<id> -X
+	// github.com/mincodeai/plugin-sdk-go/rpc.BuildPluginVersion=<version>"
+	// are used; without either the result is unchanged.
+	Identity *Identity
+	// Transport must match the manifest's runtime.transport: "" or "jsonl"
+	// (one JSON message per line) or "framed" (length-prefixed frames that
+	// also carry binary data; see SendBinary).
+	Transport string
+	// OnBinary receives binary frames the plugin's views sent (framed
+	// transport only). Frames are delivered in order on one goroutine.
+	OnBinary func(ctx context.Context, channel string, data []byte)
+
 	// --- tasks ---
 
 	// Tasks enables plugin.task.* when the host negotiates features.tasks=1;
@@ -248,6 +314,16 @@ type Options struct {
 	// RejectTaskMethods (Tasks == nil): answer every plugin.task.* method with
 	// TasksNotNegotiated instead of MethodNotFound.
 	RejectTaskMethods bool
+
+	// --- database drivers ---
+
+	// Database, when set, serves the database driver protocol v1
+	// (plugin.db.*, docs/architecture/database-driver-protocol.md): it
+	// negotiates features.databaseDrivers = 1 when the host offers it and adds
+	// the top-level "databaseDrivers" member to the initialize result. Use
+	// dbdriver.NewServer. Nil keeps the initialize result unchanged and
+	// answers plugin.db.* with MethodNotFound.
+	Database DatabaseHandler
 
 	// --- lifecycle ---
 
@@ -342,6 +418,16 @@ type TaskOptions struct {
 	// ClipError, when set, turns a failed task's error message into the
 	// snapshot error text instead of the MaxErrorBytes byte clip.
 	ClipError func(message string) string
+	// DisableEvents stops negotiating features.taskEvents. By default, when
+	// the host offers taskEvents = 1, Serve echoes it and sends a
+	// plugin.task.changed notification ({"taskId": ...}) whenever a task
+	// finishes or reports progress (progress at most every
+	// TaskEventInterval), so the host refreshes the task at once instead of
+	// waiting for its next status poll.
+	DisableEvents bool
+	// TaskEventInterval throttles progress notifications per task (default
+	// 100ms); terminal states are always announced immediately.
+	TaskEventInterval time.Duration
 }
 
 // TaskFunc is task work returned by TaskOptions.Start.
@@ -356,4 +442,23 @@ type TaskResult struct {
 	Result          json.RawMessage
 	Error           string
 	CancelRequested bool
+}
+
+// DatabaseHandler serves the plugin.db.* methods of the database driver
+// protocol (implemented by dbdriver.Server; the interface keeps this package
+// free of database dependencies).
+type DatabaseHandler interface {
+	// DatabaseDetails is the compact JSON object written as the initialize
+	// result's top-level "databaseDrivers" member ({"protocol":1,"drivers":[...]}).
+	DatabaseDetails() json.RawMessage
+	// StartDatabaseCall runs synchronously in the read loop: it validates the
+	// params, applies admission limits and registers request ids (so a later
+	// plugin.db.cancel always finds them), then returns the work that Serve
+	// runs in its own goroutine. ctx ends when Serve stops. A non-nil *Error is
+	// the reply; the work's error goes through the usual error mapping
+	// (*Error verbatim).
+	StartDatabaseCall(ctx context.Context, method string, params json.RawMessage) (func() (any, error), *Error)
+	// CloseDatabase closes every handle and cursor; Serve calls it once when
+	// the transport stops (plugin.shutdown, EOF), before OnClose.
+	CloseDatabase()
 }
