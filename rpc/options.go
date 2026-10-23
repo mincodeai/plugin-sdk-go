@@ -37,6 +37,7 @@ func NewError(code int, message string) *Error { return &Error{Code: code, Messa
 // Standard codes.
 const (
 	CodeParseError     = -32700
+	CodeInvalidRequest = -32600
 	CodeMethodNotFound = -32601
 	CodeInvalidParams  = -32602
 	CodeServerError    = -32000
@@ -160,7 +161,11 @@ type Options struct {
 	// RequireVersion requires "jsonrpc":"2.0".
 	RequireVersion bool
 	// Invalid and InvalidMessage handle unusable lines.
-	Invalid        InvalidMode
+	Invalid InvalidMode
+	// JSONRPC2 completes JSON-RPC 2.0: a line holding an array is a batch
+	// answered with one array (§6), and a parsable message that is not a valid
+	// request gets -32600 echoing its id when valid, else null (§5.1).
+	JSONRPC2       bool
 	InvalidMessage string
 	// InvalidOmitID (InvalidReply) writes the -32700 reply without an "id"
 	// member ({"jsonrpc":"2.0","error":{...}}) instead of "id":null.
@@ -209,6 +214,13 @@ type Options struct {
 	// the empty reply. data is the event payload. Nil answers plugin.event
 	// with method-not-found.
 	OnEvent func(ctx context.Context, event string, data json.RawMessage, h host.Caller)
+
+	// OnUIMessage receives free-form messages the plugin's views posted with
+	// transport.postMessage (plugin.ui.message), in order on one goroutine;
+	// viewID is the sending view's manifest ID. Reply with PostUIMessage. Nil
+	// answers plugin.ui.message with method-not-found. Messages carry no risk
+	// confirmation: keep writes and dangerous operations in actions.
+	OnUIMessage func(ctx context.Context, viewID string, message json.RawMessage)
 
 	// --- invoke ---
 

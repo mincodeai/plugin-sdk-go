@@ -80,6 +80,7 @@ func handle(ctx context.Context, action string, payload json.RawMessage) (any, e
 - 任务：`o.Tasks = &rpc.TaskOptions{...}` 且宿主在 `plugin.initialize` 协商 `features.tasks=1` 后启用 `plugin.task.start/status/cancel`；handler 内用 `rpc.ReportProgress(ctx, v)` 报告进度。宿主同时提供 `features.taskEvents=1` 时 SDK 自动回显，并在任务结束（立即）或报告进度（每个任务最多每 `TaskEventInterval`，默认 100 ms）时发送通知 `plugin.task.changed {"taskId"}`，宿主据此立即读取状态而不必等下一次轮询；`TaskOptions.DisableEvents` 可关闭。
 - 并发：未声明的 action 由 `MaxInflight`（默认 1）串行，满时立即回 `Busy`（`-32029`）。只读、没有未加锁共享状态、审计过的 action 可列入 `ConcurrentActions`，绕过该闸门（含 `SharedGate` 任务），由 `MaxConcurrent`（默认 16）限制；声明后先解析 params 再判断闸门（相当于 `ParamsBeforeBusy`）。`BusyWait`（默认 0）> 0 时闸门已满的 invoke 先按到达顺序排队等待槽位（最多 `MaxQueued`，默认 16），超时才回 `Busy`；任务启动从不排队。官方插件只能把清单里 `risk: "read"` 的 action 声明为并发。
 - 主要开关（完整说明见 `rpc/options.go` 注释）：
+  - JSON-RPC 2.0：`JSONRPC2`（两个预设均开启）——一行一个数组即批量请求，回复写成一个数组（§6）；能解析但不是合法请求的消息回 `-32600`（id 合法时原样带回，否则 null）；没有 method 的消息视为响应，从不回复。未开启 `RequireVersion` 的宽松预设只对非对象值回 `-32600`，其余宽松行为不变
   - 分帧：`MaxLineBytes`、`OverlongFatal`、`StrictJSON`、`RequireVersion`、`DecodeEnvelope`（自定义请求信封解码，如旧的 DisallowUnknownFields 结构体）、`Invalid` / `InvalidMessage` / `InvalidOmitID`（`-32700` 回复不带 id 成员）、`SkipEmptyLines` / `SkipBlankLines`、`NonStringMethod`、`IDs` / `MaxIDBytes`
   - 回复：`Style`（`StyleGo` / `StyleSorted` / `StyleJS`）、`EscapeHTML`
   - 方法：`MethodNotFound`、`RequireInitialize` / `NotInitialized`、`TasksNotNegotiated`、`RejectTaskMethods`
@@ -95,6 +96,7 @@ func handle(ctx context.Context, action string, payload json.RawMessage) (any, e
 | --- | --- | --- |
 | JSON | 严格（`jsonx.Strict`），必须 `"jsonrpc":"2.0"` | 宽松，不要求 jsonrpc |
 | 非法行 | 回复 `-32700`（id null） | stderr 写 `Invalid plugin RPC request` |
+| 批量请求 / `-32600` | 支持；完整校验请求格式 | 支持；只对非对象值回 `-32600` |
 | 超长行（1 MiB） | 致命，写 FatalMessage 退出 | 视为非法行 |
 | id | 仅字符串/数字且 ≤256 字节 | 任何存在的 id（含 null） |
 | 未知方法 | `-32601 Method not found` | `-32601 不支持的方法` |

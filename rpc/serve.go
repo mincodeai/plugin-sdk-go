@@ -33,6 +33,10 @@ type server struct {
 	tasks  *taskTable
 	wg     sync.WaitGroup
 
+	// uiMessages queues plugin.ui.message for OnUIMessage (ui_messages.go).
+	uiMessages     chan uiMessage
+	uiMessagesOnce sync.Once
+
 	mu           sync.Mutex
 	writeErr     error
 	replyStopped bool // in-flight replies and host requests are dropped
@@ -54,6 +58,12 @@ type server struct {
 	// oldest first. Releasing a slot hands it to the first waiter.
 	waiters   []chan struct{}
 	closeOnce sync.Once
+	// batches maps a pending request id to the batch collecting its reply.
+	// A request id repeated within or across open batches queues one entry
+	// per occurrence, so every reply lands in a batch array (oldest first).
+	batches map[string][]*replyBatch
+	// dispatch is the batch whose entry handleLine is processing, if any.
+	dispatch *replyBatch
 }
 
 func (o *Options) setDefaults() {
@@ -244,16 +254,32 @@ func (s *server) readLine(r *bufio.Reader) (line []byte, overlong bool, err erro
 // write sends one message (a line, or a JSON frame on the framed transport)
 // unless the transport finished. Caller holds s.mu.
 func (s *server) writeLocked(line []byte) error {
+	return s.writeRawLocked(s.frameLocked(line))
+}
+
+// frameLocked encodes one message for the transport: a JSON frame, or the
+// line and its newline.
+func (s *server) frameLocked(line []byte) []byte {
 	if s.framed() {
-		return s.writeRawLocked(encodeJSONFrame(line))
+		return encodeJSONFrame(line)
 	}
 	b := make([]byte, 0, len(line)+1)
-	return s.writeRawLocked(append(append(b, line...), '\n'))
+	return append(append(b, line...), '\n')
 }
 
 // writeRawLocked writes already-encoded bytes. Caller holds s.mu.
 func (s *server) writeRawLocked(b []byte) error {
-	if s.finished || s.writeErr != nil {
+	if s.finished {
+		return errWrite
+	}
+	return s.writeOutLocked(b)
+}
+
+// writeOutLocked writes even after the transport finished, for the one reply
+// that must still go out then: a batch holding plugin.shutdown (its array is
+// complete only after shutdown marked the transport finished). Caller holds s.mu.
+func (s *server) writeOutLocked(b []byte) error {
+	if s.writeErr != nil {
 		return errWrite
 	}
 	if _, err := s.out.Write(b); err != nil {
@@ -271,6 +297,11 @@ func (s *server) replyLocked(id json.RawMessage, result json.RawMessage, e *Erro
 	}
 	if err != nil {
 		line, _ = s.encodeReply(id, nil, s.o.PanicError)
+	}
+	if batch := s.takeBatchLocked(id); batch != nil {
+		batch.add(line)
+		s.flushBatchLocked(batch, false)
+		return
 	}
 	_ = s.writeLocked(line)
 }
@@ -293,10 +324,11 @@ func (s *server) invalid() {
 				JSONRPC string     `json:"jsonrpc"`
 				Error   *wireError `json:"error"`
 			}{"2.0", &wireError{Code: CodeParseError, Message: s.o.InvalidMessage}}, s.o.EscapeHTML)
-			_ = s.writeLocked(line)
+			s.protocolReplyLocked(line)
 			return
 		}
-		s.replyLocked(json.RawMessage("null"), nil, NewError(CodeParseError, s.o.InvalidMessage))
+		line, _ := s.encodeReply(json.RawMessage("null"), nil, NewError(CodeParseError, s.o.InvalidMessage))
+		s.protocolReplyLocked(line)
 		return
 	}
 	if s.errOut != nil {
@@ -330,9 +362,24 @@ func (s *server) handleLine(line []byte) bool {
 		s.invalid()
 		return false
 	}
+	if s.o.JSONRPC2 {
+		if trimmed := bytes.TrimLeft(line, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+			return s.handleBatch(trimmed)
+		}
+	}
 	env, ok := s.decodeEnvelope(line)
 	if !ok {
+		// A parsable non-object is not a request (-32600); an object whose
+		// members do not decode keeps the preset's parse-error handling.
+		if s.o.JSONRPC2 && json.Valid(line) && !isJSONObject(line) {
+			s.invalidRequest(nil)
+			return false
+		}
 		s.invalid()
+		return false
+	}
+	if s.strictRequests() && !validJSONRPCRequest(env) {
+		s.invalidRequest(env["id"])
 		return false
 	}
 	if s.o.RequireVersion {
@@ -379,6 +426,10 @@ func (s *server) handleLine(line []byte) bool {
 	if !hasID || !s.acceptID(id) {
 		return false
 	}
+	// Every request reaching here is answered exactly once.
+	s.mu.Lock()
+	s.registerBatchLocked(id)
+	s.mu.Unlock()
 	params := env["params"]
 	if nonString {
 		s.mu.Lock()
@@ -444,6 +495,8 @@ func (s *server) handleLine(line []byte) bool {
 		s.configurationChanged(id, params)
 	case "plugin.event":
 		s.hostEvent(id, params)
+	case "plugin.ui.message":
+		s.uiMessageRequest(id, params)
 	case "plugin.task.start", "plugin.task.status", "plugin.task.cancel":
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -994,6 +1047,10 @@ func (s *server) databaseCall(id json.RawMessage, method string, params json.Raw
 // those only as whitespace), so the reply stays one valid line. Otherwise it
 // reports false and replyLocked handles the reply. Caller holds s.mu.
 func (s *server) replyResultFastLocked(id, result json.RawMessage) bool {
+	// A batched request's reply must be collected into its batch array.
+	if s.batches[string(id)] != nil {
+		return false
+	}
 	if s.o.Style != StyleGo || s.o.EscapeHTML || bytes.ContainsAny(result, "\r\n") {
 		return false
 	}
@@ -1043,7 +1100,7 @@ func (s *server) shutdown(id json.RawMessage) {
 		s.waitDrain()
 		s.closeAll()
 		s.mu.Lock()
-		s.replyLocked(id, json.RawMessage("{}"), nil)
+		s.shutdownReplyLocked(id)
 		s.finished, s.replyStopped = true, true
 		s.mu.Unlock()
 		return
@@ -1056,7 +1113,7 @@ func (s *server) shutdown(id json.RawMessage) {
 		s.tasks.cancelAllLocked()
 	}
 	if !s.o.ShutdownReplyLast {
-		s.replyLocked(id, json.RawMessage("{}"), nil)
+		s.shutdownReplyLocked(id)
 		s.finished = true
 	}
 	s.mu.Unlock()
@@ -1066,7 +1123,7 @@ func (s *server) shutdown(id json.RawMessage) {
 			s.closeAll()
 		}
 		s.mu.Lock()
-		s.replyLocked(id, json.RawMessage("{}"), nil)
+		s.shutdownReplyLocked(id)
 		s.finished = true
 		s.mu.Unlock()
 	}
