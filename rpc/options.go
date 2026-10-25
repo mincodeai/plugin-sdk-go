@@ -123,6 +123,10 @@ const (
 	PayloadObject
 )
 
+// LargeStorageLineBytes is the input line limit after features.largeStorage
+// was negotiated: a host reply carrying a full 4 MiB storage value.
+const LargeStorageLineBytes = 4<<20 + 64<<10
+
 // Options configure Serve. The zero value is not useful; start from a preset.
 type Options struct {
 	// --- framing ---
@@ -137,6 +141,12 @@ type Options struct {
 	// on a line that does not fit a bufio.Scanner buffer of this size (line
 	// plus newline), e.g. a 4 MiB scanner in front of a 1 MiB MaxLineBytes.
 	FatalLineBytes int
+	// LargeStorage opts in to features.largeStorage: when the host offers it,
+	// host.storage values up to 4 MiB can be read and written, and the input
+	// limits (MaxLineBytes, a non-zero FatalLineBytes) rise to
+	// LargeStorageLineBytes. Hosts without the feature keep every message,
+	// and so every stored value, within 1 MiB.
+	LargeStorage bool
 	// FatalMessage is written to stderr (plus newline) when Serve fails
 	// (read/write error or fatal overlong line).
 	FatalMessage string

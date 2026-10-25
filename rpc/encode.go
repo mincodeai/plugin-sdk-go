@@ -23,6 +23,9 @@ type goEnvelope struct {
 // encodeReply renders one reply line (without newline). result must be valid
 // JSON when e is nil.
 func (s *server) encodeReply(id json.RawMessage, result json.RawMessage, e *Error) ([]byte, error) {
+	if s.o.Style != StyleJS {
+		id = escapeIDSeparators(id)
+	}
 	var we *wireError
 	if e != nil {
 		we = &wireError{Code: e.Code, Message: e.Message, Data: e.Data}
@@ -63,6 +66,16 @@ func (s *server) encodeReply(id json.RawMessage, result json.RawMessage, e *Erro
 		return b.Bytes(), nil
 	}
 	return encodeJSON(goEnvelope{JSONRPC: "2.0", ID: id, Result: result, Error: we}, s.o.EscapeHTML)
+}
+
+// 仅规范化字符串 ID 的分隔符，保留数字精度与已有转义形式。
+func escapeIDSeparators(id json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimLeft(id, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return id
+	}
+	id = bytes.ReplaceAll(id, []byte("\u2028"), []byte(`\u2028`))
+	return bytes.ReplaceAll(id, []byte("\u2029"), []byte(`\u2029`))
 }
 
 func encodeJSON(v any, escapeHTML bool) ([]byte, error) {
@@ -147,6 +160,73 @@ func (s *server) initializeResultDatabase(tasks, configuration bool) json.RawMes
 	b.Write(details)
 	b.WriteByte('}')
 	return b.Bytes()
+}
+
+// withFeature adds "name":1 to the flat "features" object of an initialize
+// result, or adds that object when there is none. The member goes last, or in
+// key order for StyleSorted; every other byte is unchanged.
+func withFeature(result json.RawMessage, name string, sorted bool) json.RawMessage {
+	member := []byte(`"` + name + `":1`)
+	const features = `"features":{`
+	f := bytes.Index(result, []byte(features))
+	if f < 0 {
+		// No negotiated feature yet: {"runtimeProtocolVersion":1} gains one.
+		end := bytes.LastIndexByte(result, '}')
+		if end < 0 {
+			return result
+		}
+		object := append(append([]byte(features), member...), '}')
+		out := make([]byte, 0, len(result)+len(object)+1)
+		if sorted {
+			// "features" sorts before "runtimeProtocolVersion".
+			out = append(out, '{')
+			out = append(out, object...)
+			out = append(out, ',')
+			return append(out, result[1:]...)
+		}
+		out = append(out, result[:end]...)
+		out = append(out, ',')
+		out = append(out, object...)
+		return append(out, result[end:]...)
+	}
+	start := f + len(features)
+	end := bytes.IndexByte(result[start:], '}')
+	if end < 0 {
+		return result
+	}
+	end += start
+	at := end
+	if sorted {
+		// Members are "key":1 in key order; insert before the first larger key.
+		for i := start; i < end; {
+			next := bytes.IndexByte(result[i:end], ',')
+			key := result[i:end]
+			if next >= 0 {
+				key = result[i : i+next]
+			}
+			if k := bytes.IndexByte(key, ':'); k >= 0 && string(key[1:k-1]) > name {
+				at = i
+				break
+			}
+			if next < 0 {
+				break
+			}
+			i += next + 1
+		}
+	}
+	out := make([]byte, 0, len(result)+len(member)+1)
+	out = append(out, result[:at]...)
+	switch {
+	case at == end && end == start:
+		out = append(out, member...)
+	case at == end:
+		out = append(out, ',')
+		out = append(out, member...)
+	default:
+		out = append(out, member...)
+		out = append(out, ',')
+	}
+	return append(out, result[at:]...)
 }
 
 // withTaskEvents adds "taskEvents":1 next to the negotiated "tasks":1 member

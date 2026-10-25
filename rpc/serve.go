@@ -49,7 +49,9 @@ type server struct {
 	database bool
 	// taskEvents is true once initialize negotiated features.taskEvents.
 	taskEvents bool
-	inflight   int
+	// largeStorage is true once initialize negotiated features.largeStorage.
+	largeStorage bool
+	inflight     int
 	// concurrent is the set of Options.ConcurrentActions; concurrentInflight
 	// counts those running outside the MaxInflight gate.
 	concurrent         map[string]bool
@@ -445,6 +447,7 @@ func (s *server) handleLine(line []byte) bool {
 				TaskEvents      json.RawMessage `json:"taskEvents"`
 				Configuration   json.RawMessage `json:"configuration"`
 				DatabaseDrivers json.RawMessage `json:"databaseDrivers"`
+				LargeStorage    json.RawMessage `json:"largeStorage"`
 			} `json:"features"`
 		}
 		_ = json.Unmarshal(params, &p)
@@ -463,6 +466,16 @@ func (s *server) handleLine(line []byte) bool {
 		}
 		if s.taskEvents {
 			result = withTaskEvents(result, s.o.Style == StyleSorted)
+		}
+		s.largeStorage = s.o.LargeStorage && string(p.Features.LargeStorage) == "1"
+		if s.largeStorage {
+			result = withFeature(result, "largeStorage", s.o.Style == StyleSorted)
+			// The reader runs on this goroutine (Serve calls handleLine between
+			// reads), so the next line already gets the raised limits.
+			s.o.MaxLineBytes = max(s.o.MaxLineBytes, LargeStorageLineBytes)
+			if s.o.FatalLineBytes > 0 {
+				s.o.FatalLineBytes = max(s.o.FatalLineBytes, LargeStorageLineBytes+1)
+			}
 		}
 		if identity := s.identity(); identity != nil {
 			result = withIdentity(result, identity)
@@ -1054,7 +1067,7 @@ func (s *server) replyResultFastLocked(id, result json.RawMessage) bool {
 	if s.o.Style != StyleGo || s.o.EscapeHTML || bytes.ContainsAny(result, "\r\n") {
 		return false
 	}
-	encodedID, err := encodeJSON(id, false)
+	encodedID, err := encodeJSON(escapeIDSeparators(id), false)
 	if err != nil {
 		return false
 	}
