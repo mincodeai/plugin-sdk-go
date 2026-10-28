@@ -123,9 +123,53 @@ AI 回合（清单能力 `ai`，API v2）：`host.StartAITurn` / `PollAITurn` / 
 | `shell` | `Exec(ctx, c, command, ShellOptions{Cwd, TimeoutSecs})`，非零退出码体现在 `ShellResult` 里而不是 error |
 | `commands` | `SetContext`（供 `when` 表达式使用的内存上下文） |
 | `workspace.read` / `workspace.write` | `WorkspaceRoot` / `ListWorkspace` / `StatWorkspace` / `ReadWorkspaceFile` / `WriteWorkspaceFile(ctx, c, path, data, WorkspaceWriteOptions{ExpectedSHA256, CreateOnly, CreateParents})`；`WorkspaceErrorCode(err)` 取出 `no_root`、`not_found`、`denied`、`conflict`、`too_large` 等机器可读错误码 |
+| `plugins` | `ListPlugins` / `InvokePlugin`；服务调用 `ListServices` / `InvokeService` / `StartService` / `WaitService` / `CancelService` 与文件封装（见下文“服务”） |
 | 无 | `HostInfo`、`Describe`（`Description.Available(method)` 做特性检测）、`Log`、`SubscribeEvents` |
 
 工作区路径相对当前工作区根目录；VCS 内部目录与凭据文件永远不可见，写入还排除 `node_modules`、`.mincode`，单次写入整文件原子替换且不超过 512 KiB。宿主事件：在 `rpc.Options` 里设置 `Events: []string{host.EventFileSaved, ...}` 与 `OnEvent func(ctx, event, data json.RawMessage, h)`，SDK 在首次 `plugin.initialize` 后自动订阅，确认 `plugin.event` 后在独立 goroutine 中回调；携带路径的事件需要 `workspace.read`。事件只送达运行中的插件，不会启动插件，也不会重放。
+
+#### 服务（Services）
+
+插件之间按能力名互相调用（`contributes.services`，设计见 `docs/superpowers/specs/2026-10-26-plugin-services-design.md`）。调用方需要 `plugins` 能力，确认规则与 `host.plugins.invoke` 相同，多个提供方时由用户选择；提供方不需要额外能力。
+
+```go
+// 调用方：等结果。宿主调用超时 = 确认等待（TimeoutMs，默认 25 s）+ 执行（ExecTimeoutMs，默认最大值 300 s）+ 5 s；ctx 的截止时间同样生效。
+text := "hello"
+res, err := host.InvokeService(ctx, c, host.ServiceCall{Service: "demo.text.reverse", Text: &text, Params: map[string]any{"keepLines": true}})
+reversed, _ := res.Text() // json 服务用 res.Decode(&v)，文件服务用 res.Files()
+
+// 调用方：上传 → 开始 → 带进度等待 → 存进自己的文件存储。
+token, err := host.UploadServiceFile(ctx, c, "report.pdf", r) // 512 KiB 分块，≤ 64 MiB
+callID, err := host.StartService(ctx, c, host.ServiceCall{Service: "demo.file.copy", Files: []host.ServiceFileSource{{Source: "upload", Token: token}}})
+res, err = host.WaitService(ctx, c, callID, func(p host.ServiceProgress) { /* p.Completed / p.Total / p.Message / p.Raw */ })
+if host.ServiceErrorCode(err) == "cancelled" { /* ... */ }
+files, _ := res.Files()
+err = host.SaveServiceFile(ctx, c, files[0].Token, "copies/report.pdf")
+
+// 提供方：服务条目指向的 action。
+func copyFile(ctx context.Context, payload json.RawMessage) (any, error) {
+	req, err := host.DecodeServiceRequest(payload) // CallID、Service、Entry、Text、Files、Params、Caller
+	if err != nil {
+		return nil, err
+	}
+	c := host.FromContext(ctx)
+	rpc.ReportProgress(ctx, host.ServiceProgress{Message: "copying"}) // 仅协商了 tasks 时有效
+	var buf bytes.Buffer
+	if err := host.ReadServiceFile(ctx, c, req.Files[0].Token, &buf); err != nil {
+		return nil, err
+	}
+	out, err := host.CreateServiceFile(ctx, c, req.CallID, "copy-"+req.Files[0].Name, &buf)
+	if err != nil {
+		return nil, err
+	}
+	return host.FilesResult(out), nil // 或 TextResult(s)、JSONResult(v)、无输出时 struct{}{}
+}
+```
+
+- 调用：`ListServices`、`InvokeService`、`StartService`、`ServiceStatus`、`WaitService`、`CancelService`。`ServiceCall` 里 `Text`（文本服务）与 `Files`（文件服务；`workspace` 来源需要 `workspace.read`，`storage` 是调用方自己的文件存储，`upload` 来自 `UploadServiceFile`）二选一，都不填表示无输入；`Provider` 可点名提供方。
+- 进度与取消：`WaitService` 在 250 ms、500 ms 后各查一次，之后每秒一次，进度变化时回调 `onProgress`（`Raw` 是提供方上报的原始进度，≤ 4 KiB）。失败或被取消返回 `*ServiceCallError{State, Code, Message, Unconfirmed}`；`ServiceErrorCode(err)` 同时读取它和宿主错误里的 `data.code`（`not_found`、`too_large`、`busy`、`timeout`、`cancelled` 等）。ctx 取消只停止等待，不取消调用，需要时用新的 ctx 调 `CancelService`；取消不是回滚，`Unconfirmed` 表示提供方可能已产生副作用。
+- 文件：`UploadServiceFile`、`ReadServiceFile`（写入 `io.Writer`）、`SaveServiceFile`（需要 `storage`，计入配额）、`ReleaseServiceFile`。句柄不含路径；输出文件保留 10 分钟。
+- 提供方：协商了 `features.tasks`（`o.Tasks`）时每次服务调用都以长任务运行，`rpc.ReportProgress(ctx, host.ServiceProgress{Completed, Total, Message})` 上报进度（`Message` ≤ 200 字符纯文本），ctx 取消即调用被取消；未协商时走普通 invoke，最长 30 秒。`CreateServiceFile` 需要信封里的 `CallID`，只能在调用进行中使用。
 
 ### jsonx
 
