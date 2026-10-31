@@ -299,6 +299,8 @@ func (s *Server) StartDatabaseCall(ctx context.Context, method string, params js
 		return s.startMutate(params)
 	case "plugin.db.destructive":
 		return s.startDestructive(params)
+	case "plugin.db.snapshotWrite":
+		return s.startSnapshotWrite(params)
 	case "plugin.db.close":
 		return s.startClose(params)
 	}
@@ -808,20 +810,8 @@ func encodeHead(cols []Column, affected *int64, notice, token, cursorID string, 
 	b := make([]byte, 0, len(rows.rows)+256)
 	b = append(b, '{')
 	if cols != nil {
-		b = append(b, `"columns":[`...)
-		for i, c := range cols {
-			if i > 0 {
-				b = append(b, ',')
-			}
-			b = append(b, `{"name":`...)
-			b = appendJSONString(b, c.Name)
-			if c.Type != "" {
-				b = append(b, `,"type":`...)
-				b = appendJSONString(b, c.Type)
-			}
-			b = append(b, '}')
-		}
-		b = append(b, "],"...)
+		b = appendColumns(b, cols)
+		b = append(b, ',')
 	}
 	b = rows.appendRows(b)
 	if affected != nil {
@@ -829,6 +819,24 @@ func encodeHead(cols []Column, affected *int64, notice, token, cursorID string, 
 		b = strconv.AppendInt(b, *affected, 10)
 	}
 	return encodeTail(b, notice, token, cursorID, done)
+}
+
+// appendColumns appends the "columns" member.
+func appendColumns(b []byte, cols []Column) []byte {
+	b = append(b, `"columns":[`...)
+	for i, c := range cols {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, `{"name":`...)
+		b = appendJSONString(b, c.Name)
+		if c.Type != "" {
+			b = append(b, `,"type":`...)
+			b = appendJSONString(b, c.Type)
+		}
+		b = append(b, '}')
+	}
+	return append(b, ']')
 }
 
 func encodeTail(b []byte, notice, token, cursorID string, done bool) json.RawMessage {
@@ -1551,6 +1559,268 @@ func (s *Server) startDestructive(params json.RawMessage) (func() (any, error), 
 		}
 		return json.RawMessage(`{"ok":true}`), nil
 	})
+}
+
+// --- snapshotWrite ---
+
+const (
+	maxSnapshotSteps = 1000
+	maxSnapshotRows  = 1_000_000
+	// snapshotStepOverhead bounds the encoded members of one step result
+	// other than before/after; snapshotReplyOverhead the envelope.
+	snapshotStepOverhead  = 96
+	snapshotReplyOverhead = 128
+)
+
+type snapshotStatementParams struct {
+	Statement string `json:"statement"`
+	Args      []any  `json:"args"`
+}
+
+type snapshotMutationParams struct {
+	Op         MutationOp     `json:"op"`
+	Table      string         `json:"table"`
+	PrimaryKey map[string]any `json:"primaryKey"`
+	Column     string         `json:"column"`
+	Value      any            `json:"value"`
+	Fields     map[string]any `json:"fields"`
+}
+
+type snapshotStepParams struct {
+	Snapshot  *snapshotStatementParams `json:"snapshot"`
+	Write     *snapshotStatementParams `json:"write"`
+	Mutation  *snapshotMutationParams  `json:"mutation"`
+	After     *snapshotStatementParams `json:"after"`
+	MaxRows   int64                    `json:"maxRows"`
+	Returning []string                 `json:"returning"`
+}
+
+type snapshotWriteParams struct {
+	Handle    string               `json:"handle"`
+	RequestID string               `json:"requestId"`
+	Database  string               `json:"database"`
+	Steps     []snapshotStepParams `json:"steps"`
+}
+
+func (p *snapshotStatementParams) statement() (*Statement, *rpc.Error) {
+	if p == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(p.Statement) == "" {
+		return nil, invalidf("invalid params: statement is required")
+	}
+	for _, a := range p.Args {
+		switch a.(type) {
+		case nil, bool, string, json.Number:
+		default:
+			return nil, invalidf("invalid params: statement arguments must be JSON scalars")
+		}
+	}
+	return &Statement{Text: p.Statement, Args: p.Args}, nil
+}
+
+func (s *Server) startSnapshotWrite(params json.RawMessage) (func() (any, error), *rpc.Error) {
+	var p snapshotWriteParams
+	if e := decodeParams(params, &p); e != nil {
+		return nil, e
+	}
+	if len(p.Steps) == 0 || len(p.Steps) > maxSnapshotSteps {
+		return nil, invalidf("invalid params: steps must have 1 to %d entries", maxSnapshotSteps)
+	}
+	req := SnapshotRequest{RequestID: p.RequestID, Database: p.Database, Steps: make([]SnapshotStep, len(p.Steps)),
+		MaxBytes: lineBudget - snapshotReplyOverhead - snapshotStepOverhead*len(p.Steps)}
+	for i, sp := range p.Steps {
+		var step SnapshotStep
+		var e *rpc.Error
+		if step.Snapshot, e = sp.Snapshot.statement(); e != nil {
+			return nil, e
+		}
+		if step.Write, e = sp.Write.statement(); e != nil {
+			return nil, e
+		}
+		if step.After, e = sp.After.statement(); e != nil {
+			return nil, e
+		}
+		if (step.Write == nil) == (sp.Mutation == nil) {
+			return nil, invalidf("invalid params: each step needs exactly one of write and mutation")
+		}
+		if sp.MaxRows < 0 || sp.MaxRows > maxSnapshotRows || step.Snapshot != nil && sp.MaxRows == 0 {
+			return nil, invalidf("invalid params: maxRows must be 1 to %d for a snapshot (0 without one)", maxSnapshotRows)
+		}
+		if m := sp.Mutation; m != nil {
+			switch m.Op {
+			case MutationUpdateCell, MutationInsertRow, MutationDeleteRow:
+			default:
+				return nil, invalidf("invalid params: unknown mutation op")
+			}
+			if m.Table == "" {
+				return nil, invalidf("invalid params: table is required")
+			}
+			step.Mutation = &Mutation{RequestID: p.RequestID, Op: m.Op, Database: p.Database, Table: m.Table,
+				PrimaryKey: m.PrimaryKey, Column: m.Column, Value: m.Value, Fields: m.Fields}
+		}
+		if len(sp.Returning) > 0 {
+			if step.Mutation == nil || step.Mutation.Op != MutationInsertRow || len(sp.Returning) > MaxColumns {
+				return nil, invalidf("invalid params: returning applies to insertRow mutations only")
+			}
+			for _, col := range sp.Returning {
+				if col == "" {
+					return nil, invalidf("invalid params: returning columns must be named")
+				}
+			}
+			step.Returning = sp.Returning
+		}
+		step.MaxRows = sp.MaxRows
+		req.Steps[i] = step
+	}
+	return s.startSimple(p.Handle, p.RequestID, func(ctx context.Context, conn Conn) (any, error) {
+		sw, ok := conn.(SnapshotWriter)
+		if !ok {
+			return nil, ErrUnsupported
+		}
+		res, err := sw.SnapshotWrite(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		out, perr := encodeSnapshotResponse(res, len(req.Steps))
+		if perr != nil {
+			// The writer answered success, so its transaction may have
+			// committed: never "limit" or a plain failure, which the host
+			// takes as rolled back and lets the user resubmit.
+			return nil, &Error{Kind: kindCommitted, Message: "snapshotWrite committed, but its result cannot be sent: " + perr.Error(), Err: perr}
+		}
+		return out, nil
+	})
+}
+
+// kindCommitted is the error kind the Server answers when a SnapshotWriter
+// returned success but its response cannot be encoded (over the reply
+// budget, a value without a lossless encoding, or a malformed response).
+// The host records the change as applied without a backup. Drivers do not
+// return it.
+const kindCommitted Kind = "committed"
+
+// encodeSnapshotResponse renders a SnapshotResponse within the reply line
+// budget, closing every result it was given.
+func encodeSnapshotResponse(res *SnapshotResponse, steps int) (json.RawMessage, error) {
+	if res != nil {
+		defer func() {
+			for _, st := range res.Steps {
+				for _, r := range []*Result{st.Before, st.After} {
+					if r != nil && r.Rows != nil {
+						_ = r.Rows.Close()
+					}
+				}
+			}
+		}()
+	}
+	switch {
+	case res == nil:
+		return nil, Errorf(KindDatabase, "driver returned no snapshotWrite result")
+	case res.Exceeded:
+		if res.ExceededStep < 0 || res.ExceededStep >= steps {
+			return nil, Errorf(KindDatabase, "driver returned an invalid exceededStep")
+		}
+		b := append([]byte(`{"steps":[],"exceeded":true,"exceededStep":`), strconv.Itoa(res.ExceededStep)...)
+		return append(b, '}'), nil
+	case len(res.Steps) != steps:
+		return nil, Errorf(KindDatabase, "driver returned %d snapshotWrite step results for %d steps", len(res.Steps), steps)
+	}
+	b := make([]byte, 0, 1024)
+	b = append(b, `{"steps":[`...)
+	for i, st := range res.Steps {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, '{')
+		var err error
+		if st.Before != nil && st.Before.Rows != nil {
+			if b, err = appendSnapshotMember(b, "before", st.Before.Rows); err != nil {
+				return nil, err
+			}
+			b = append(b, ',')
+		}
+		b = append(b, `"affected":`...)
+		b = strconv.AppendInt(b, st.Affected, 10)
+		if st.After != nil && st.After.Rows != nil {
+			b = append(b, ',')
+			if b, err = appendSnapshotMember(b, "after", st.After.Rows); err != nil {
+				return nil, err
+			}
+		}
+		if st.Returned != nil {
+			if b, err = appendSnapshotReturned(b, st.Returned); err != nil {
+				return nil, err
+			}
+		}
+		b = append(b, '}')
+		if len(b) > lineBudget {
+			return nil, errSnapshotLimit
+		}
+	}
+	b = append(b, `],"exceeded":false,"exceededStep":0}`...)
+	if len(b) > lineBudget {
+		return nil, errSnapshotLimit
+	}
+	return b, nil
+}
+
+var errSnapshotLimit = Errorf(KindLimit, "snapshot results exceed the %d byte reply limit", lineBudget)
+
+// appendSnapshotMember appends `"name":{columns,rows}`, reading and closing
+// rows. It stops with errSnapshotLimit as soon as b outgrows the reply
+// budget.
+func appendSnapshotMember(b []byte, name string, rows Rows) ([]byte, error) {
+	defer rows.Close()
+	cols := rows.Columns()
+	if len(cols) > MaxColumns {
+		return nil, Errorf(KindDatabase, "result has more than %d columns", MaxColumns)
+	}
+	b = append(b, '"')
+	b = append(b, name...)
+	b = append(b, `":`...)
+	b = appendSnapshotHead(b, cols)
+	for n := 0; ; n++ {
+		row, err := rows.Next(context.Background())
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(row) != len(cols) {
+			return nil, Errorf(KindDatabase, "driver returned a row with %d values for %d columns", len(row), len(cols))
+		}
+		if b, err = appendSnapshotRow(b, n, row); err != nil {
+			return nil, err
+		}
+		if len(b) > lineBudget {
+			return nil, errSnapshotLimit
+		}
+	}
+	return append(b, "]}"...), nil
+}
+
+// appendSnapshotResult appends {"columns":[…],"rows":[[cell,…]]} with
+// SnapshotCell values.
+func appendSnapshotResult(b []byte, cols []Column, rows [][]any) ([]byte, error) {
+	b = appendSnapshotHead(b, cols)
+	for i, row := range rows {
+		var err error
+		if b, err = appendSnapshotRow(b, i, row); err != nil {
+			return nil, err
+		}
+	}
+	return append(b, "]}"...), nil
+}
+
+func appendSnapshotHead(b []byte, cols []Column) []byte {
+	if cols == nil {
+		cols = []Column{}
+	}
+	b = append(b, '{')
+	b = appendColumns(b, cols)
+	return append(b, `,"rows":[`...)
 }
 
 // startSimple runs a cancellable request without a result set.

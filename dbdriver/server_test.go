@@ -204,6 +204,9 @@ func TestErrorsAreClassifiedAndScrubbed(t *testing.T) {
 	if _, e = c.Call("plugin.db.mutate", map[string]any{"handle": h, "requestId": "m", "op": "deleteRow", "database": "d", "table": "t", "primaryKey": map[string]any{"id": 1}}); dbdrivertest.ErrorKind(e) != "unsupported" {
 		t.Fatalf("mutate unsupported %+v", e)
 	}
+	if _, e = c.Call("plugin.db.snapshotWrite", map[string]any{"handle": h, "requestId": "s", "database": "d", "steps": []any{map[string]any{"write": map[string]any{"statement": "update"}, "maxRows": 0}}}); dbdrivertest.ErrorKind(e) != "unsupported" {
+		t.Fatalf("snapshotWrite unsupported %+v", e)
+	}
 	if _, e = c.Call("plugin.db.tableRows", map[string]any{"handle": h, "requestId": "t", "database": "d", "table": "t", "limit": 1, "offset": 0, "readOnly": false, "maxRows": 1, "maxBytes": 100}); e == nil || e.Code != -32602 {
 		t.Fatalf("tableRows readOnly false %+v", e)
 	}

@@ -3,6 +3,7 @@ package dbdriver
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -33,6 +34,27 @@ type SQLOptions struct {
 	TableRows func(ctx context.Context, db *sql.DB, req TableRowsRequest) (statement string, args []any, err error)
 	Mutate    func(ctx context.Context, db *sql.DB, m Mutation) (int64, error)
 	Destroy   func(ctx context.Context, db *sql.DB, req DestructiveRequest) error
+	// MutateIn applies a structured row edit on q (the snapshotWrite
+	// transaction). Without it, snapshotWrite requests that contain a
+	// mutation step fail with ErrUnsupported before anything runs. A driver
+	// with both hooks can implement Mutate as MutateIn(ctx, db, m).
+	MutateIn func(ctx context.Context, q Querier, m Mutation) (int64, error)
+	// InsertReturning inserts m (an insertRow) on q and returns the affected
+	// row count and the values of columns of the inserted row (for example
+	// generated keys). It is used for insert mutation steps that ask for
+	// returning columns; without it those steps run through MutateIn and
+	// return no values.
+	InsertReturning func(ctx context.Context, q Querier, m Mutation, columns []string) (int64, map[string]any, error)
+	// NoTransactions marks an engine without transactions:
+	// plugin.db.snapshotWrite then answers unsupported. Do not declare
+	// transaction.snapshotWrite for such a driver.
+	NoTransactions bool
+}
+
+// Querier runs statements; *sql.DB, *sql.Conn and *sql.Tx satisfy it.
+type Querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // FromSQL returns a Driver over database/sql. open builds the *sql.DB from
@@ -118,7 +140,7 @@ func newSQLConn(db *sql.DB, o SQLOptions) Conn {
 	if o.TableRows != nil {
 		c = sqlWithTableRows(c, base)
 	}
-	if o.Mutate != nil || o.Destroy != nil {
+	if o.Mutate != nil || o.Destroy != nil || !o.NoTransactions {
 		c = sqlWithWrites(c, base)
 	}
 	return c
@@ -159,11 +181,7 @@ func (c *sqlConn) run(ctx context.Context, statement string, args []any, databas
 			cleanup = append(cleanup, func() { _ = c.o.ReadWriteContext(context.WithoutCancel(ctx), conn) })
 		}
 	}
-	type execer interface {
-		ExecContext(context.Context, string, ...any) (sql.Result, error)
-		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-	}
-	var ex execer = conn
+	var ex Querier = conn
 	if readOnly && c.o.ReadOnlyTx {
 		tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
@@ -209,26 +227,34 @@ type sqlRows struct {
 
 func (r *sqlRows) Columns() []Column { return r.cols }
 
-func (r *sqlRows) Next(context.Context) ([]any, error) {
-	if !r.rows.Next() {
-		if err := r.rows.Err(); err != nil {
+func (r *sqlRows) Next(context.Context) ([]any, error) { return scanRow(r.rows, len(r.cols), false) }
+
+// scanRow reads the next row of n columns, or io.EOF. []byte values are
+// copied, as strings unless keepBytes is set.
+func scanRow(rows *sql.Rows, n int, keepBytes bool) ([]any, error) {
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
 			return nil, err
 		}
 		return nil, io.EOF
 	}
-	vals := make([]any, len(r.cols))
-	ptrs := make([]any, len(r.cols))
+	vals := make([]any, n)
+	ptrs := make([]any, n)
 	for i := range vals {
 		ptrs[i] = &vals[i]
 	}
-	if err := r.rows.Scan(ptrs...); err != nil {
+	if err := rows.Scan(ptrs...); err != nil {
 		return nil, err
 	}
 	for i, v := range vals {
 		// Scan into *any reuses driver buffers only for sql.RawBytes; copy
 		// []byte anyway so a value never aliases the next row.
 		if b, ok := v.([]byte); ok {
-			vals[i] = string(b)
+			if keepBytes {
+				vals[i] = append([]byte{}, b...)
+			} else {
+				vals[i] = string(b)
+			}
 		}
 	}
 	return vals, nil
@@ -292,8 +318,9 @@ func sqlWithWrites(c Conn, s *sqlConn) Conn {
 	return &sqlWrites{Conn: c, s: s, inner: c}
 }
 
-// sqlWrites implements Mutator and Destroyer and forwards the read
-// interfaces of inner (reporting them unsupported when inner lacks them).
+// sqlWrites implements Mutator, Destroyer and SnapshotWriter and forwards
+// the read interfaces of inner (reporting them unsupported when inner lacks
+// them).
 type sqlWrites struct {
 	Conn
 	s     *sqlConn
@@ -326,4 +353,152 @@ func (c *sqlWrites) TableRows(ctx context.Context, req TableRowsRequest) (*Resul
 		return tp.TableRows(ctx, req)
 	}
 	return nil, ErrUnsupported
+}
+
+// SnapshotWrite runs the steps in one transaction on a pinned connection
+// (after UseDatabase) and commits only when all of them succeeded within
+// MaxRows and MaxBytes.
+func (c *sqlWrites) SnapshotWrite(ctx context.Context, req SnapshotRequest) (*SnapshotResponse, error) {
+	o := c.s.o
+	if o.NoTransactions {
+		return nil, ErrUnsupported
+	}
+	for _, st := range req.Steps {
+		if st.Mutation != nil && o.MutateIn == nil {
+			return nil, ErrUnsupported
+		}
+	}
+	conn, err := c.s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if req.Database != "" && o.UseDatabase != nil {
+		if err := o.UseDatabase(ctx, conn, req.Database); err != nil {
+			return nil, err
+		}
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	budget := req.MaxBytes
+	out := &SnapshotResponse{Steps: make([]SnapshotStepResult, len(req.Steps))}
+	for i, st := range req.Steps {
+		res := &out.Steps[i]
+		if st.Snapshot != nil {
+			cols, rows, exceeded, err := collectRows(ctx, tx, st.Snapshot, st.MaxRows, &budget)
+			if err != nil {
+				return nil, err
+			}
+			if exceeded {
+				return &SnapshotResponse{Exceeded: true, ExceededStep: i}, nil
+			}
+			res.Before = &Result{Rows: SliceRows(cols, rows)}
+		}
+		switch {
+		case st.Write != nil:
+			r, err := tx.ExecContext(ctx, st.Write.Text, sqlArgs(st.Write.Args)...)
+			if err != nil {
+				return nil, err
+			}
+			if res.Affected, err = r.RowsAffected(); err != nil {
+				res.Affected = -1
+			}
+		case st.Mutation.Op == MutationInsertRow && len(st.Returning) > 0 && o.InsertReturning != nil:
+			if res.Affected, res.Returned, err = o.InsertReturning(ctx, tx, *st.Mutation, st.Returning); err != nil {
+				return nil, err
+			}
+			size, err := SnapshotReturnedSize(res.Returned)
+			if err != nil {
+				return nil, err
+			}
+			if budget -= size; budget < 0 {
+				return nil, errSnapshotLimit
+			}
+		default:
+			if res.Affected, err = o.MutateIn(ctx, tx, *st.Mutation); err != nil {
+				return nil, err
+			}
+		}
+		if st.After != nil {
+			cols, rows, _, err := collectRows(ctx, tx, st.After, 0, &budget)
+			if err != nil {
+				return nil, err
+			}
+			res.After = &Result{Rows: SliceRows(cols, rows)}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
+	return out, nil
+}
+
+// collectRows reads the result of st into memory, charging its encoded
+// size to budget. With maxRows > 0 it reads at most maxRows rows and then
+// probes one more: exceeded reports that it exists (the probe row is never
+// charged, so an over-long snapshot answers exceeded rather than a limit).
+func collectRows(ctx context.Context, q Querier, st *Statement, maxRows int64, budget *int) (cols []Column, out [][]any, exceeded bool, err error) {
+	rows, err := q.QueryContext(ctx, st.Text, sqlArgs(st.Args)...)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer rows.Close()
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	cols = make([]Column, len(types))
+	for i, t := range types {
+		cols[i] = Column{Name: t.Name(), Type: t.DatabaseTypeName()}
+	}
+	size, _ := SnapshotResultSize(cols, nil)
+	for {
+		row, err := scanRow(rows, len(cols), true)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if maxRows > 0 && int64(len(out)) == maxRows {
+			return nil, nil, true, nil
+		}
+		enc, err := appendSnapshotRow(nil, 1, row)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if size += len(enc); size > *budget {
+			return nil, nil, false, errSnapshotLimit
+		}
+		out = append(out, row)
+	}
+	*budget -= size
+	return cols, out, false, nil
+}
+
+// sqlArgs converts protocol arguments for database/sql: integral numbers
+// become int64, other numbers keep their exact text.
+func sqlArgs(args []any) []any {
+	out := make([]any, len(args))
+	for i, a := range args {
+		if n, ok := a.(json.Number); ok {
+			if v, err := n.Int64(); err == nil {
+				out[i] = v
+			} else {
+				out[i] = string(n)
+			}
+			continue
+		}
+		out[i] = a
+	}
+	return out
 }

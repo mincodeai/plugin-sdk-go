@@ -21,6 +21,10 @@ const (
 	KindUnsupported Kind = "unsupported"
 	KindInvalid     Kind = "invalid"
 	KindBusy        Kind = "busy"
+	// KindLimit reports a snapshotWrite whose snapshot rows do not fit one
+	// reply; the transaction was rolled back and the host retries in
+	// smaller batches.
+	KindLimit Kind = "limit"
 )
 
 // Error is a classified driver error. Drivers return it (or wrap it) to pick

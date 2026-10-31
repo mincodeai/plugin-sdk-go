@@ -2,10 +2,10 @@
 // protocol v1.1 (docs/architecture/database-driver-protocol.md): a plugin that
 // declares the database.driver capability and contributes.databaseDrivers
 // implements Driver (and optionally MetadataProvider, TableRowsProvider,
-// Mutator and Destroyer on its Conn), wraps it in a Server and sets
-// rpc.Options.Database. The Server owns everything protocol-shaped: strict
-// params, opaque handles and cursors, pull-based paging within the page
-// budget, cell encoding, requestId cancellation, timeouts, the 16-call and
+// Mutator, Destroyer and SnapshotWriter on its Conn), wraps it in a Server
+// and sets rpc.Options.Database. The Server owns everything protocol-shaped:
+// strict params, opaque handles and cursors, pull-based paging within the
+// page budget, cell encoding, requestId cancellation, timeouts, the 16-call and
 // 32-session limits, idle cursor expiry and closing everything on shutdown.
 //
 // Credentials arrive as Secret values. Never log, print or persist them, and
@@ -348,6 +348,79 @@ type DestructiveRequest struct {
 // Destroyer is implemented by a Conn with destructive.* features.
 type Destroyer interface {
 	Destroy(ctx context.Context, req DestructiveRequest) error
+}
+
+// Statement is one SQL statement with positional arguments. Args are JSON
+// scalars: nil, bool, string or json.Number (FromSQL passes integers as
+// int64 and other numbers as their exact text).
+type Statement struct {
+	Text string
+	Args []any
+}
+
+// SnapshotStep is one step of a snapshotWrite: read the rows the write will
+// touch, apply the write, then optionally read the rows back.
+type SnapshotStep struct {
+	// Snapshot selects the rows before the write (nil: none).
+	Snapshot *Statement
+	// Write or Mutation (exactly one is set) is the change.
+	Write    *Statement
+	Mutation *Mutation
+	// After re-reads the written rows (typically by primary key; nil: none).
+	After *Statement
+	// MaxRows bounds the Snapshot rows (1 to 1,000,000; 0 when Snapshot is
+	// nil). A snapshot with more rows rolls the whole request back and
+	// answers Exceeded.
+	MaxRows int64
+	// Returning names columns of the row an insertRow Mutation inserted
+	// (for example generated keys) to return in SnapshotStepResult.Returned.
+	Returning []string
+}
+
+// SnapshotRequest is a plugin.db.snapshotWrite call: all steps run in one
+// transaction that commits only when every step succeeded.
+type SnapshotRequest struct {
+	RequestID string
+	// Database is the database to run in ("" for the connection default).
+	Database string
+	Steps    []SnapshotStep
+	// MaxBytes bounds the encoded size of all Before and After results and
+	// Returned values together (see SnapshotResultSize and
+	// SnapshotReturnedSize; a snapshot's probe row beyond MaxRows is not
+	// counted). An implementation that would exceed it must roll back
+	// before committing and return an *Error of KindLimit, so the host
+	// retries in smaller batches; the Server checks the reply again but can
+	// no longer undo a commit.
+	MaxBytes int
+}
+
+// SnapshotStepResult is the outcome of one step. Before and After must be
+// fully read before the transaction ends (use SliceRows); the Server reads
+// them after SnapshotWrite returned. Their values and Returned are sent as
+// SnapshotCell, so they must have a lossless encoding (EncodeSnapshotCell).
+type SnapshotStepResult struct {
+	Before   *Result
+	Affected int64
+	After    *Result
+	// Returned holds the Returning column values (nil: none).
+	Returned map[string]any
+}
+
+// SnapshotResponse answers a SnapshotRequest. Steps has one result per
+// request step. When Exceeded is set the transaction was rolled back,
+// ExceededStep is the 0-based step whose snapshot exceeded MaxRows and Steps
+// is ignored.
+type SnapshotResponse struct {
+	Steps        []SnapshotStepResult
+	Exceeded     bool
+	ExceededStep int
+}
+
+// SnapshotWriter is implemented by a Conn with the transaction.snapshotWrite
+// feature. It must run every step in one transaction and roll back on any
+// error, on Exceeded and on a MaxBytes overflow.
+type SnapshotWriter interface {
+	SnapshotWrite(ctx context.Context, req SnapshotRequest) (*SnapshotResponse, error)
 }
 
 // Host metadata DTOs (the exact shapes of backend/db).

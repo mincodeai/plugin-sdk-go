@@ -37,8 +37,12 @@ type FakeSQL struct {
 	// Statements records every Query/Exec, prefixed "ro:" inside a read-only
 	// transaction.
 	Statements []string
+	// Args holds the arguments of each recorded statement (nil without).
+	Args [][]driver.Value
 	// ReadOnlyTx counts BeginTx calls with ReadOnly set.
 	ReadOnlyTx int
+	// Transactions, Commits and Rollbacks count read-write transactions.
+	Transactions, Commits, Rollbacks int
 	// Open counts open connections.
 	Open int
 }
@@ -51,6 +55,21 @@ func (f *FakeSQL) Recorded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.Statements...)
+}
+
+// RecordedArgs returns the arguments of each recorded statement.
+func (f *FakeSQL) RecordedArgs() [][]driver.Value {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]driver.Value(nil), f.Args...)
+}
+
+// TxCounts returns how many read-write transactions began, committed and
+// rolled back.
+func (f *FakeSQL) TxCounts() (begun, committed, rolledBack int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.Transactions, f.Commits, f.Rollbacks
 }
 
 // OpenConns returns the number of open connections.
@@ -78,6 +97,7 @@ func (fakeDriver) Open(string) (driver.Conn, error) { return nil, errors.New("us
 type fakeConn struct {
 	f      *FakeSQL
 	inTxRO bool
+	inTxRW bool
 	closed bool
 }
 
@@ -105,6 +125,11 @@ func (c *fakeConn) BeginTx(_ context.Context, o driver.TxOptions) (driver.Tx, er
 		c.f.ReadOnlyTx++
 		c.f.mu.Unlock()
 		c.inTxRO = true
+	} else {
+		c.f.mu.Lock()
+		c.f.Transactions++
+		c.f.mu.Unlock()
+		c.inTxRW = true
 	}
 	return fakeTx{c}, nil
 }
@@ -115,16 +140,30 @@ func (c *fakeConn) ResetSession(context.Context) error { return nil }
 
 type fakeTx struct{ c *fakeConn }
 
-func (t fakeTx) Commit() error   { t.c.inTxRO = false; return nil }
-func (t fakeTx) Rollback() error { t.c.inTxRO = false; return nil }
+func (t fakeTx) Commit() error   { t.end(func(f *FakeSQL) { f.Commits++ }); return nil }
+func (t fakeTx) Rollback() error { t.end(func(f *FakeSQL) { f.Rollbacks++ }); return nil }
 
-func (c *fakeConn) lookup(ctx context.Context, query string) (FakeResult, error) {
+func (t fakeTx) end(count func(*FakeSQL)) {
+	if t.c.inTxRW {
+		t.c.f.mu.Lock()
+		count(t.c.f)
+		t.c.f.mu.Unlock()
+	}
+	t.c.inTxRO, t.c.inTxRW = false, false
+}
+
+func (c *fakeConn) lookup(ctx context.Context, query string, args []driver.NamedValue) (FakeResult, error) {
 	c.f.mu.Lock()
 	rec := query
 	if c.inTxRO {
 		rec = "ro:" + query
 	}
 	c.f.Statements = append(c.f.Statements, rec)
+	var vals []driver.Value
+	for _, a := range args {
+		vals = append(vals, a.Value)
+	}
+	c.f.Args = append(c.f.Args, vals)
 	r, ok := c.f.Script[query]
 	c.f.mu.Unlock()
 	if !ok {
@@ -146,16 +185,16 @@ func (c *fakeConn) lookup(ctx context.Context, query string) (FakeResult, error)
 	return r, r.Err
 }
 
-func (c *fakeConn) QueryContext(ctx context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	r, err := c.lookup(ctx, query)
+func (c *fakeConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	r, err := c.lookup(ctx, query, args)
 	if err != nil {
 		return nil, err
 	}
 	return &fakeRows{r: r}, nil
 }
 
-func (c *fakeConn) ExecContext(ctx context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	r, err := c.lookup(ctx, query)
+func (c *fakeConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	r, err := c.lookup(ctx, query, args)
 	if err != nil {
 		return nil, err
 	}
