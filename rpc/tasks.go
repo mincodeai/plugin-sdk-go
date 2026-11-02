@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/mincodeai/plugin-sdk-go/host"
@@ -24,6 +26,10 @@ type task struct {
 	Error           string          `json:"error,omitempty"`
 	cancel          context.CancelFunc
 	finished        time.Time
+	// delivered: a start/status/cancel reply carried the terminal snapshot to
+	// the host, which keeps it from then on. Such a task no longer reserves a
+	// MaxRetained slot (evictDeliveredLocked).
+	delivered bool
 	// concurrent: a ConcurrentActions action holding a concurrent slot
 	// instead of the shared gate (SharedGate only).
 	concurrent bool
@@ -100,6 +106,40 @@ func (t *taskTable) pruneLocked() {
 	}
 }
 
+// evictDeliveredLocked makes room for one new task: while MaxRetained tasks
+// are held it drops finished tasks whose terminal snapshot the host already
+// received, oldest finished first. Running and undelivered tasks stay.
+func (t *taskTable) evictDeliveredLocked() {
+	excess := len(t.tasks) - t.o.MaxRetained + 1
+	if excess <= 0 {
+		return
+	}
+	candidates := make([]*task, 0, len(t.tasks))
+	for _, x := range t.tasks {
+		if x.delivered && !x.finished.IsZero() {
+			candidates = append(candidates, x)
+		}
+	}
+	slices.SortFunc(candidates, func(a, b *task) int {
+		if order := a.finished.Compare(b.finished); order != 0 {
+			return order
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	for _, x := range candidates[:min(excess, len(candidates))] {
+		delete(t.tasks, x.ID)
+	}
+}
+
+// replyTaskLocked replies with x's snapshot and records a delivered terminal
+// snapshot.
+func (s *server) replyTaskLocked(id json.RawMessage, x *task) {
+	s.replyLocked(id, s.tasks.snapshot(x), nil)
+	if !x.finished.IsZero() && x.State != "running" {
+		x.delivered = true
+	}
+}
+
 func (t *taskTable) cancelAllLocked() {
 	for _, x := range t.tasks {
 		if x.State == "running" {
@@ -160,7 +200,7 @@ func (s *server) taskLookupLocked(id, params json.RawMessage, cancel bool) {
 		x.CancelRequested = true
 		x.cancel()
 	}
-	s.replyLocked(id, t.snapshot(x), nil)
+	s.replyTaskLocked(id, x)
 }
 
 func (s *server) taskStartLocked(id, params json.RawMessage) {
@@ -235,6 +275,7 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 			return
 		}
 	}
+	t.evictDeliveredLocked()
 	if len(t.tasks) >= t.o.MaxRetained {
 		s.replyLocked(id, nil, t.o.LimitReached)
 		return
@@ -257,7 +298,7 @@ func (s *server) taskStartLocked(id, params json.RawMessage) {
 			x.State, x.Error, x.finished = "failed", t.clip(s.mapError(err).Message), time.Now()
 			x.cancel = func() {}
 			t.tasks[taskID] = x
-			s.replyLocked(id, t.snapshot(x), nil)
+			s.replyTaskLocked(id, x)
 			return
 		}
 	}

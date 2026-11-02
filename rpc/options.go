@@ -384,7 +384,11 @@ type TaskOptions struct {
 	// IDPattern validates task ids (default ^[a-zA-Z0-9_-]{1,64}$).
 	IDPattern *regexp.Regexp
 	// Limits (defaults 64 retained, 2 running, 300s deadline, 5m retention,
-	// 256 KiB result, 4096 B progress, 1000 B error).
+	// 256 KiB result, 4096 B progress, 1000 B error). MaxRetained counts
+	// running tasks and finished tasks the host has not read yet: a finished
+	// task whose terminal snapshot a start/status/cancel reply already
+	// carried is dropped (oldest first) when a new start needs its slot;
+	// otherwise finished tasks stay readable for Retention.
 	MaxRetained      int
 	MaxRunning       int
 	Deadline         time.Duration
