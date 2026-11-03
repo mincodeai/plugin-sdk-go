@@ -360,6 +360,35 @@ func TestWaitServiceReportsProgressThenReturnsResult(t *testing.T) {
 	}
 }
 
+func TestDecodeServiceRequestSurfaceContext(t *testing.T) {
+	req, err := DecodeServiceRequest(json.RawMessage(`{"callId":"sc_4","service":"demo.file.inspect","entry":"inspect","input":[{"token":"sf_1","name":"response.json","mime":"application/json","size":2}],"params":{},"caller":{"kind":"host","surface":"httpResponse"},"surfaceContext":{"response":{"status":200,"headers":[["Content-Type","application/json"]],"headersRedacted":1}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var context struct {
+		Response struct {
+			Status          int        `json:"status"`
+			Headers         [][]string `json:"headers"`
+			HeadersRedacted int        `json:"headersRedacted"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(req.SurfaceContext, &context); err != nil || context.Response.Status != 200 || len(context.Response.Headers) != 1 || context.Response.HeadersRedacted != 1 || req.Caller.Surface != "httpResponse" {
+		t.Fatalf("%+v %s %v", req, req.SurfaceContext, err)
+	}
+	for _, payload := range []string{
+		`{"callId":"sc_5","service":"demo.text.reverse","entry":"reverse","input":"abc","caller":{"kind":"plugin","pluginId":"consumer"}}`,
+		`{"callId":"sc_5","service":"demo.text.reverse","entry":"reverse","input":"abc","caller":{"kind":"host","surface":"palette"},"surfaceContext":null}`,
+	} {
+		req, err := DecodeServiceRequest(json.RawMessage(payload))
+		if err != nil || req.SurfaceContext != nil {
+			t.Fatalf("%s: %s %v", payload, req.SurfaceContext, err)
+		}
+	}
+	if _, err := DecodeServiceRequest(json.RawMessage(`{"callId":"sc_6","service":"a.b","entry":"e","surfaceContext":[1]}`)); err == nil {
+		t.Fatal("accepted a surfaceContext that is not an object")
+	}
+}
+
 func TestDecodeServiceRequestAndResults(t *testing.T) {
 	req, err := DecodeServiceRequest(json.RawMessage(`{"callId":"sc_1","service":"demo.text.reverse","entry":"reverse","input":"abc","params":{"keepLines":true},"caller":{"kind":"plugin","pluginId":"consumer"}}`))
 	if err != nil {

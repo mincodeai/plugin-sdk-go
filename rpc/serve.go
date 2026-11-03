@@ -508,6 +508,8 @@ func (s *server) handleLine(line []byte) bool {
 		s.configurationChanged(id, params)
 	case "plugin.event":
 		s.hostEvent(id, params)
+	case "plugin.globalShortcut.activation":
+		s.globalShortcutActivation(id, params)
 	case "plugin.ui.message":
 		s.uiMessageRequest(id, params)
 	case "plugin.task.start", "plugin.task.status", "plugin.task.cancel":
@@ -892,6 +894,33 @@ func (s *server) hostEvent(id json.RawMessage, params json.RawMessage) {
 	go func() {
 		defer s.wg.Done()
 		callback(s.ctx, p.Event, p.Data, s.host)
+	}()
+}
+
+// globalShortcutActivation acknowledges plugin.globalShortcut.activation and
+// runs OnGlobalShortcutActivation outside the read loop. Without the callback
+// the method is unknown.
+func (s *server) globalShortcutActivation(id json.RawMessage, params json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.o.OnGlobalShortcutActivation == nil || !s.initialized {
+		s.replyLocked(id, nil, NewError(CodeMethodNotFound, s.o.MethodNotFound))
+		return
+	}
+	var p struct {
+		ID    string `json:"id"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.ID == "" || p.Token == "" {
+		s.replyLocked(id, nil, NewError(CodeInvalidParams, "invalid global shortcut activation params"))
+		return
+	}
+	s.replyLocked(id, json.RawMessage(`{}`), nil)
+	callback := s.o.OnGlobalShortcutActivation
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		callback(s.ctx, p.ID, p.Token, s.host)
 	}()
 }
 

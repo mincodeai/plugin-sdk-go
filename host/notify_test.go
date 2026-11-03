@@ -32,3 +32,29 @@ func TestNotifyAndClipboardHelpers(t *testing.T) {
 		t.Fatalf("nil caller: %v", err)
 	}
 }
+
+func TestNotifyActions(t *testing.T) {
+	var params json.RawMessage
+	reply := `{"delivered":true,"actions":1}`
+	caller := CallerFunc(func(_ context.Context, _ string, p any) (json.RawMessage, error) {
+		params, _ = json.Marshal(p)
+		return json.RawMessage(reply), nil
+	})
+	result, err := NotifyWithResult(context.Background(), caller, Notification{
+		Title: "同步失败", Actions: []NotificationAction{{ID: "retry", Title: "重试", Command: "sync.retry"}},
+	})
+	if err != nil || string(params) != `{"title":"同步失败","actions":[{"id":"retry","title":"重试","command":"sync.retry"}]}` {
+		t.Fatalf("params %s %v", params, err)
+	}
+	if !result.Delivered || result.Actions == nil || *result.Actions != 1 {
+		t.Fatalf("result %+v", result)
+	}
+	reply = `{"delivered":true}`
+	result, err = NotifyWithResult(context.Background(), caller, Notification{Title: "x"})
+	if err != nil || !result.Delivered || result.Actions != nil || string(params) != `{"title":"x"}` {
+		t.Fatalf("old host %+v %s %v", result, params, err)
+	}
+	if _, err := NotifyWithResult(context.Background(), nil, Notification{Title: "x"}); err != ErrUnavailable {
+		t.Fatalf("nil caller: %v", err)
+	}
+}

@@ -114,6 +114,8 @@ AI 回合（清单能力 `ai`，API v2）：`host.StartAITurn` / `PollAITurn` / 
 
 状态栏（`contributes.statusBar`，能力 `commands`，API v2）：`host.UpdateStatusBarItem(ctx, c, host.StatusBarUpdate{ID, Text, Tooltip, Severity, Busy, Visible})` 更新声明为 `"dynamic": true` 的条目（nil 字段保持原值），`host.ResetStatusBar(ctx, c, id)` 恢复单个条目，`id` 为空时恢复全部。宿主合并推送（最新值生效）、超过 50 次/秒的更新静默丢弃，插件停止/崩溃/禁用/重载/卸载时清空动态状态。
 
+文件装饰（`contributes.fileDecorations`，能力 `workspace.read`，宿主 0.3.0）：宿主在用户展开目录时调用提供者的 read 动作，载荷 `{provider, project: {name, root}, directory, names, locale}`，结果 `{"decorations": {"<name>": {badge?, color?, tooltip?}}}` 只接受请求中的名称；`badge` 1–2 个可见字符，`color` 只能是 `accent`、`success`、`warning`、`danger`、`info`、`muted` 之一。文件变化后可调用 `host.RefreshDecorations(ctx, c)` 提示资源树重新请求已展开目录：这是不带数据的提示，每插件每 2 秒最多生效一次，过频返回 `(false, nil)`；旧宿主或未声明 `fileDecorations` 的插件得到 `-32601`，SDK 同样返回 `(false, nil)`。
+
 其余宿主能力都有同名封装（全部在 `host` 包，`c` 为 nil 时返回 `ErrUnavailable`）：
 
 | 能力 | 函数 |
@@ -122,11 +124,16 @@ AI 回合（清单能力 `ai`，API v2）：`host.StartAITurn` / `PollAITurn` / 
 | `secrets` | `GetSecret` / `SetSecret` / `DeleteSecret` / `ListSecrets` |
 | `shell` | `Exec(ctx, c, command, ShellOptions{Cwd, TimeoutSecs})`，非零退出码体现在 `ShellResult` 里而不是 error |
 | `commands` | `SetContext`（供 `when` 表达式使用的内存上下文） |
+| `notifications` | `Notify(ctx, c, host.Notification{Title, Body, Level, System, ViewID, Actions})`；`NotifyWithResult` 另返回 `NotifyResult{Delivered, Actions}`。`Actions`（宿主 0.3.0 起，旧宿主忽略、通知照发，此时结果的 `Actions` 为 nil）最多 2 个 `NotificationAction{ID, Title, Command}`：`ID` 匹配 `^[A-Za-z0-9._-]{1,32}$` 且不重复，`Title` 单行、不超过 24 字符（超长拒绝而非截断），`Command` 必须是本插件 `contributes.commands` 中的 ID，不带参数；任一项不合规整个调用返回 `-32602`、不发通知 |
+| `clipboard` | `ReadClipboard` / `WriteClipboard` |
 | `workspace.read` / `workspace.write` | `WorkspaceRoot` / `ListWorkspace` / `StatWorkspace` / `ReadWorkspaceFile` / `WriteWorkspaceFile(ctx, c, path, data, WorkspaceWriteOptions{ExpectedSHA256, CreateOnly, CreateParents})`；`WorkspaceErrorCode(err)` 取出 `no_root`、`not_found`、`denied`、`conflict`、`too_large` 等机器可读错误码 |
 | `plugins` | `ListPlugins` / `InvokePlugin`；服务调用 `ListServices` / `InvokeService` / `StartService` / `WaitService` / `CancelService` 与文件封装（见下文“服务”） |
+| `remote.context`（宿主 0.3.0 起） | 无函数：只允许 `ssh/connection/context`、`sftp/file/context`、`redis/key/context`、`http/request/context` 菜单（`contributes.menus`）的条目使用 `passContext`，用户选中的对象在动作载荷 `{"menu", "context", "payload"}` 里，自行解析 JSON |
 | 无 | `HostInfo`、`Describe`（`Description.Available(method)` 做特性检测）、`Log`、`SubscribeEvents` |
 
 工作区路径相对当前工作区根目录；VCS 内部目录与凭据文件永远不可见，写入还排除 `node_modules`、`.mincode`，单次写入整文件原子替换且不超过 512 KiB。宿主事件：在 `rpc.Options` 里设置 `Events: []string{host.EventFileSaved, ...}` 与 `OnEvent func(ctx, event, data json.RawMessage, h)`，SDK 在首次 `plugin.initialize` 后自动订阅，确认 `plugin.event` 后在独立 goroutine 中回调；携带路径的事件需要 `workspace.read`。事件只送达运行中的插件，不会启动插件，也不会重放。
+
+全局快捷键（`contributes.globalShortcuts`，`run.type: "action"`）：用户按下已开启的快捷键时，宿主在动作的固定 payload 前加上 `{"trigger":{"type":"globalShortcut","id":"<条目 id>"}}`，用 `host.TriggerFrom(payload)` 读出 `host.Trigger{Type, ID}`（没有触发来源时 `ok` 为 false）。动作结束后（成功或失败）宿主发送 `plugin.globalShortcut.activation {id, token, expiresAt}`：在 `rpc.Options` 里设置 `OnGlobalShortcutActivation func(ctx, id, token string, h host.Caller)`，SDK 回复 `{}` 后在独立 goroutine 中回调；不设置时该请求返回 `-32601`，宿主忽略。令牌一次性、120 秒内有效、只属于本插件；插件持有未使用的令牌期间，宿主不会因空闲而停止按需启动的插件进程，令牌在整个有效期内可用（插件被停止、停用、重载或崩溃时令牌仍会作废）；`host.OpenView(ctx, h, host.ViewRequest{ViewID: "main", Raise: true, Activation: token})` 凭它把主窗口拉到前台并打开本插件的标签视图（不能是悬浮视图或其他插件的视图）。没有令牌、令牌已用、过期或属于其他插件时宿主拒绝，错误 `data.code` 为 `activation_invalid`；MinCode 锁定期间的 raise 一律被拒，`data.code` 为 `locked`；不带 `Raise` 的打开照旧，不会移动窗口。协议与安全审查见 `docs/architecture/plugin-system.md`。
 
 #### 服务（Services）
 
@@ -148,7 +155,7 @@ err = host.SaveServiceFile(ctx, c, files[0].Token, "copies/report.pdf")
 
 // 提供方：服务条目指向的 action。
 func copyFile(ctx context.Context, payload json.RawMessage) (any, error) {
-	req, err := host.DecodeServiceRequest(payload) // CallID、Service、Entry、Text、Files、Params、Caller
+	req, err := host.DecodeServiceRequest(payload) // CallID、Service、Entry、Text、Files、Params、Caller、SurfaceContext
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +177,7 @@ func copyFile(ctx context.Context, payload json.RawMessage) (any, error) {
 - 进度与取消：`WaitService` 在 250 ms、500 ms 后各查一次，之后每秒一次，进度变化时回调 `onProgress`（`Raw` 是提供方上报的原始进度，≤ 4 KiB）。失败或被取消返回 `*ServiceCallError{State, Code, Message, Unconfirmed}`；`ServiceErrorCode(err)` 同时读取它和宿主错误里的 `data.code`（`not_found`、`too_large`、`busy`、`timeout`、`cancelled` 等）。ctx 取消只停止等待，不取消调用，需要时用新的 ctx 调 `CancelService`；取消不是回滚，`Unconfirmed` 表示提供方可能已产生副作用。
 - 文件：`UploadServiceFile`、`ReadServiceFile`（写入 `io.Writer`）、`SaveServiceFile`（需要 `storage`，计入配额）、`ReleaseServiceFile`。句柄不含路径；输出文件保留 10 分钟。
 - 提供方：协商了 `features.tasks`（`o.Tasks`）时每次服务调用都以长任务运行，`rpc.ReportProgress(ctx, host.ServiceProgress{Completed, Total, Message})` 上报进度（`Message` ≤ 200 字符纯文本），ctx 取消即调用被取消；未协商时走普通 invoke，最长 30 秒。`CreateServiceFile` 需要信封里的 `CallID`，只能在调用进行中使用。
+- 主程序位置（宿主 0.3.0 起）：条目在 `surfaces` 里写明 `sftpFile`、`dbResult`、`httpResponse`、`terminalSelection` 后，分别收到 SFTP 远程文件、结果集 `result.json`、HTTP 响应体 `response.<扩展名>` 和终端选中文字，`Caller` 为 `{Kind: "host", Surface: …}`。这些调用还带 `ServiceRequest.SurfaceContext`（`json.RawMessage`，宿主已按提供方能力删减；插件调用方、旧位置或删减后为空时为 nil）：`{remote | remoteOmitted}`（SFTP，需要 `remote.context`）、`{database}`（结果集，需要 `database.schema`）、`{response, request?}`（HTTP，`request` 需要 `remote.context`）、`{terminal: {kind}}`，自行解析 JSON。字段与 `result.json` 格式见 `docs/development/plugin-development.md` 4.5 节。
 
 ### jsonx
 

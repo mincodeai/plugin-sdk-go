@@ -61,6 +61,45 @@ func TestUIHelpersCallGenericHostMethods(t *testing.T) {
 	}
 }
 
+func TestViewRequestRaiseSerialization(t *testing.T) {
+	plain, _ := json.Marshal(ViewRequest{ViewID: "main"})
+	if string(plain) != `{"viewId":"main"}` {
+		t.Fatalf("plain %s", plain)
+	}
+	raised, _ := json.Marshal(ViewRequest{ViewID: "main", Raise: true, Activation: "tok"})
+	if string(raised) != `{"viewId":"main","raise":true,"activation":"tok"}` {
+		t.Fatalf("raise %s", raised)
+	}
+	var sent any
+	caller := CallerFunc(func(_ context.Context, _ string, p any) (json.RawMessage, error) {
+		sent = p
+		return json.RawMessage(`{"requested":true,"raised":true}`), nil
+	})
+	if err := OpenView(context.Background(), caller, ViewRequest{ViewID: "main", Raise: true}); err == nil || sent != nil {
+		t.Fatal("raise without activation was sent")
+	}
+	if err := OpenView(context.Background(), caller, ViewRequest{ViewID: "main", Raise: true, Activation: "tok"}); err != nil || sent == nil {
+		t.Fatalf("raise: %v", err)
+	}
+}
+
+func TestTriggerFrom(t *testing.T) {
+	for payload, want := range map[string]Trigger{
+		`{"trigger":{"type":"globalShortcut","id":"capture"},"mode":"region"}`: {Type: "globalShortcut", ID: "capture"},
+		`"{\"trigger\":{\"type\":\"globalShortcut\",\"id\":\"full\"}}"`:        {Type: "globalShortcut", ID: "full"},
+	} {
+		got, ok := TriggerFrom(json.RawMessage(payload))
+		if !ok || got != want {
+			t.Fatalf("%s: %+v %v", payload, got, ok)
+		}
+	}
+	for _, payload := range []string{``, `null`, `{}`, `{"mode":"region"}`, `{"trigger":"x"}`, `{"trigger":{"type":"","id":"x"}}`, `{"trigger":{"type":"globalShortcut"}}`, `[1]`, `not json`} {
+		if got, ok := TriggerFrom(json.RawMessage(payload)); ok {
+			t.Fatalf("%s: %+v", payload, got)
+		}
+	}
+}
+
 func TestPluginCallHelpers(t *testing.T) {
 	caller := CallerFunc(func(_ context.Context, method string, p any) (json.RawMessage, error) {
 		switch method {

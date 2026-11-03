@@ -552,14 +552,21 @@ type ServiceCallerInfo struct {
 // ServiceRequest is the payload a provider's action receives. Text is set
 // for a text service, Files for a file service; Params holds the validated
 // params with defaults filled in. CallID is needed by CreateServiceFile.
+//
+// SurfaceContext is the JSON object some host surfaces add (host 0.3.0:
+// sftpFile, dbResult, httpResponse, terminalSelection), or nil. The host
+// trims it to the provider's capabilities: remote identifiers need
+// remote.context, database names database.schema. Plugin callers and the
+// older surfaces never send one.
 type ServiceRequest struct {
-	CallID  string
-	Service string
-	Entry   string
-	Text    string
-	Files   []ServiceFileRef
-	Params  json.RawMessage
-	Caller  ServiceCallerInfo
+	CallID         string
+	Service        string
+	Entry          string
+	Text           string
+	Files          []ServiceFileRef
+	Params         json.RawMessage
+	Caller         ServiceCallerInfo
+	SurfaceContext json.RawMessage
 }
 
 // DecodeServiceRequest decodes a provider action's payload.
@@ -571,6 +578,8 @@ func DecodeServiceRequest(payload json.RawMessage) (ServiceRequest, error) {
 		Input   json.RawMessage   `json:"input"`
 		Params  json.RawMessage   `json:"params"`
 		Caller  ServiceCallerInfo `json:"caller"`
+		// SurfaceContext is set by newer host surfaces.
+		SurfaceContext json.RawMessage `json:"surfaceContext"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.CallID == "" || envelope.Service == "" || envelope.Entry == "" {
 		return ServiceRequest{}, errors.New("invalid service request")
@@ -578,6 +587,12 @@ func DecodeServiceRequest(payload json.RawMessage) (ServiceRequest, error) {
 	request := ServiceRequest{CallID: envelope.CallID, Service: envelope.Service, Entry: envelope.Entry, Params: envelope.Params, Caller: envelope.Caller}
 	if isNull(request.Params) {
 		request.Params = json.RawMessage(`{}`)
+	}
+	if context := bytes.TrimSpace(envelope.SurfaceContext); !isNull(context) {
+		if context[0] != '{' {
+			return ServiceRequest{}, errors.New("invalid service request surfaceContext")
+		}
+		request.SurfaceContext = context
 	}
 	input := bytes.TrimSpace(envelope.Input)
 	switch {

@@ -54,11 +54,22 @@ func OpenEditor(ctx context.Context, c Caller, location EditorLocation) error {
 // when PluginID is set. With Entry the view page receives an open request
 // (source "plugin", from = the calling plugin) carrying Params: strings,
 // numbers and booleans only, at most 16 keys.
+//
+// Raise also brings the MinCode main window to the front. It needs
+// Activation, the single-use token the host delivered after one of the
+// plugin's global shortcut actions ran (rpc.Options.OnGlobalShortcutActivation,
+// valid for 120 s), and works only for the plugin's own tab view (PluginID
+// empty or the plugin itself, not a floating view). Without a valid token the
+// host refuses the request with error data code "activation_invalid" (and
+// with "locked" while MinCode is locked); a request without Raise never moves
+// the window.
 type ViewRequest struct {
-	PluginID string         `json:"pluginId,omitempty"`
-	ViewID   string         `json:"viewId"`
-	Entry    string         `json:"entry,omitempty"`
-	Params   map[string]any `json:"params,omitempty"`
+	PluginID   string         `json:"pluginId,omitempty"`
+	ViewID     string         `json:"viewId"`
+	Entry      string         `json:"entry,omitempty"`
+	Params     map[string]any `json:"params,omitempty"`
+	Raise      bool           `json:"raise,omitempty"`
+	Activation string         `json:"activation,omitempty"`
 }
 
 // OpenView calls host.view.open (ui).
@@ -69,8 +80,35 @@ func OpenView(ctx context.Context, c Caller, request ViewRequest) error {
 	if request.ViewID == "" {
 		return errors.New("view request requires a viewId")
 	}
+	if request.Raise && request.Activation == "" {
+		return errors.New("raising the main window requires an activation token")
+	}
 	_, err := c.Call(ctx, "host.view.open", request)
 	return err
+}
+
+// Trigger says what started an action. A global shortcut press adds
+// {"trigger": {"type": "globalShortcut", "id": "<entry id>"}} to the
+// action's fixed payload.
+type Trigger struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// TriggerFrom reads the trigger of an action payload (a JSON object, or a
+// JSON string holding one). ok is false when the payload carries none.
+func TriggerFrom(payload json.RawMessage) (Trigger, bool) {
+	var text string
+	if json.Unmarshal(payload, &text) == nil {
+		payload = json.RawMessage(text)
+	}
+	var body struct {
+		Trigger *Trigger `json:"trigger"`
+	}
+	if json.Unmarshal(payload, &body) != nil || body.Trigger == nil || body.Trigger.Type == "" || body.Trigger.ID == "" {
+		return Trigger{}, false
+	}
+	return *body.Trigger, true
 }
 
 // DiffSide is one side of a diff: UTF-8 text of at most 256 KiB.

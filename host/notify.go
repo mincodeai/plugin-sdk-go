@@ -16,6 +16,29 @@ type Notification struct {
 	System bool `json:"system,omitempty"`
 	// ViewID is the plugin view a click opens (default: the first view).
 	ViewID string `json:"viewId,omitempty"`
+	// Actions are up to 2 buttons shown on the notification in MinCode's
+	// notification center (host 0.3.0; older hosts ignore them and still
+	// deliver the notification). Each Command must be one of this plugin's
+	// contributes.commands; an invalid action rejects the whole call.
+	Actions []NotificationAction `json:"actions,omitempty"`
+}
+
+// NotificationAction is a notification button (host 0.3.0). ID matches
+// ^[A-Za-z0-9._-]{1,32}$ and is unique in the notification; Title is a single
+// line of at most 24 characters; Command is one of this plugin's commands,
+// run without arguments.
+type NotificationAction struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Command string `json:"command"`
+}
+
+// NotifyResult is the host's answer to NotifyWithResult.
+type NotifyResult struct {
+	Delivered bool `json:"delivered"`
+	// Actions is how many buttons the host shows; nil on hosts older than
+	// 0.3.0, which ignore Notification.Actions.
+	Actions *int `json:"actions,omitempty"`
 }
 
 // Notify posts a notification (title ≤ 80, body ≤ 500 characters; at most 10 per minute).
@@ -25,6 +48,24 @@ func Notify(ctx context.Context, c Caller, notification Notification) error {
 	}
 	_, err := c.Call(ctx, "host.notify", notification)
 	return err
+}
+
+// NotifyWithResult is Notify that also returns the host's result, so a plugin
+// can tell whether its notification actions are shown (host 0.3.0; older
+// hosts ignore actions).
+func NotifyWithResult(ctx context.Context, c Caller, notification Notification) (NotifyResult, error) {
+	if c == nil {
+		return NotifyResult{}, ErrUnavailable
+	}
+	raw, err := c.Call(ctx, "host.notify", notification)
+	if err != nil {
+		return NotifyResult{}, err
+	}
+	var result NotifyResult
+	if len(raw) > 0 && string(raw) != "null" {
+		err = json.Unmarshal(raw, &result)
+	}
+	return result, err
 }
 
 // ClipboardText is the result of ReadClipboard (manifest capability "clipboard").

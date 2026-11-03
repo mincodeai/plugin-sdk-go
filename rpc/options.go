@@ -225,6 +225,17 @@ type Options struct {
 	// with method-not-found.
 	OnEvent func(ctx context.Context, event string, data json.RawMessage, h host.Caller)
 
+	// OnGlobalShortcutActivation runs in its own goroutine for each
+	// plugin.globalShortcut.activation request (after the empty reply): one of
+	// the plugin's global shortcut actions has finished, successfully or not.
+	// id is the shortcut entry, token a single-use activation token valid for
+	// 120 s; pass it as host.ViewRequest{Raise: true, Activation: token} to
+	// bring the main window forward on the plugin's own tab view. The host
+	// does not idle-stop an on-demand plugin while it holds an unspent token;
+	// a stop, disable, reload or crash still revokes it. Nil answers
+	// the request with method-not-found (the host ignores that).
+	OnGlobalShortcutActivation func(ctx context.Context, id, token string, h host.Caller)
+
 	// OnUIMessage receives free-form messages the plugin's views posted with
 	// transport.postMessage (plugin.ui.message), in order on one goroutine;
 	// viewID is the sending view's manifest ID. Reply with PostUIMessage. Nil
