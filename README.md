@@ -26,13 +26,13 @@ replace github.com/mincodeai/plugin-sdk-go => ../../../packages/plugin-sdk-go
 replace github.com/mincodeai/plugin-sdk-go => ./third_party/plugin-sdk-go
 ```
 
-目前的使用方是 Vue + Go 插件模板（`tools/plugin-templates/visual-process-vue-go/backend`，会经 Node devkit 与 `mincode create` 复制到开发者机器）和 draw（gitlink 仓库，由自己的 CI 构建；协议配置与 excalidraw 相同）。副本由 `tools/plugin-sdk/sync-go-sdk.mjs` 生成：只含 `go.mod`、`README.md`、`LICENSE` 与非测试 `.go` 源码（不含 `*_test.go`），另写一个记录校验和的 `VERSION`。**不要手改副本**，改 SDK 后运行：
+目前的使用方是 Vue + Go 与 TypeScript + Go 插件模板（`tools/plugin-templates/visual-process-vue-go/backend`、`visual-process-ts-go/backend`，内置在 `mincode` 命令行工具里，经 `mincode plugin create` 复制到开发者机器）和 draw（gitlink 仓库，由自己的 CI 构建；协议配置与 excalidraw 相同）。副本由 `tools/plugin-sdk/sync-go-sdk.mjs` 生成：只含 `go.mod`、`README.md`、`LICENSE` 与非测试 `.go` 源码（不含 `*_test.go`），另写一个记录校验和的 `VERSION`。**不要手改副本**，改 SDK 后运行：
 
 - `pnpm sync:go-sdk`：刷新全部副本（draw 未检出时跳过）；
 - `pnpm verify:go-sdk-vendor`（CI 执行）：副本与本目录不一致即失败；`pnpm verify:plugin-template` 也会先检查模板副本；
 - `node scripts/test-go-plugins.mjs draw`（在 `vue-app` 下）：要求 draw 的 replace 指向 `./third_party/plugin-sdk-go` 且副本无漂移。
 
-devkit 导出时另附 `sdk/go`（同样的副本）和 `tools/sync-go-sdk.mjs`，仓库外的插件可用 `--source <kit>/sdk/go` 更新自己的副本。
+仓库外的插件用新版 `mincode` 命令行工具的 `mincode plugin sync [项目目录]` 更新自己的副本（来源是命令行工具内置的同一份副本，加 `--check` 只检查）。没有命令行工具时，devkit 导出时另附的 `sdk/go`（同样的副本）和 `tools/sync-go-sdk.mjs` 可作备用：在套件根目录运行 `node tools/sync-go-sdk.mjs --source sdk/go <项目>/backend`。
 
 不要提交 `go.work` / `go.work.sum`（已在根 `.gitignore`）；本地想联调可以自建 go.work，但 CI 与发布构建都是 `GOWORK=off`。
 
