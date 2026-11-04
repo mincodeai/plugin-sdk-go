@@ -425,3 +425,46 @@ func TestDecodeServiceRequestAndResults(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceCallNoPromptSendsInteractiveFalse(t *testing.T) {
+	h := &serviceHost{reply: func(method string, _ map[string]any) (json.RawMessage, error) {
+		if method == "host.services.start" {
+			return json.RawMessage(`{"callId":"sc_1","provider":{"pluginId":"p","entryId":"e"}}`), nil
+		}
+		return json.RawMessage(`{"provider":{"pluginId":"p","entryId":"e"},"output":null}`), nil
+	}}
+	if _, err := InvokeService(context.Background(), h, ServiceCall{Service: "backup.target.list", NoPrompt: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StartService(context.Background(), h, ServiceCall{Service: "backup.target.list", NoPrompt: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InvokeService(context.Background(), h, ServiceCall{Service: "backup.target.list"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{
+		`{"interactive":false,"service":"backup.target.list"}`,
+		`{"interactive":false,"service":"backup.target.list"}`,
+		`{"service":"backup.target.list"}`,
+	} {
+		if h.params[i] != want {
+			t.Fatalf("call %d (%s) params %s, want %s", i, h.methods[i], h.params[i], want)
+		}
+	}
+}
+
+func TestServiceErrorCodeInteractionRequired(t *testing.T) {
+	h := &serviceHost{reply: func(string, map[string]any) (json.RawMessage, error) {
+		return nil, &Error{Code: -32000, Message: "interaction_required: the call needs the user's confirmation", Data: json.RawMessage(`{"code":"interaction_required"}`)}
+	}}
+	_, err := InvokeService(context.Background(), h, ServiceCall{Service: "backup.target.put", NoPrompt: true})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if got := ServiceErrorCode(err); got != ServiceErrInteractionRequired {
+		t.Fatalf("code %q, want %q", got, ServiceErrInteractionRequired)
+	}
+	if ServiceErrInteractionRequired != "interaction_required" {
+		t.Fatalf("constant %q", ServiceErrInteractionRequired)
+	}
+}

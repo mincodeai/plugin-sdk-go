@@ -105,7 +105,16 @@ type ServiceCall struct {
 	Params        map[string]any
 	TimeoutMs     int
 	ExecTimeoutMs int
+	// NoPrompt sends interactive:false: the host fails with code
+	// "interaction_required" instead of asking the user (host 0.3.0+;
+	// older hosts answer invalid_params).
+	NoPrompt bool
 }
+
+// ServiceErrInteractionRequired is the ServiceErrorCode of a NoPrompt call
+// that would have needed the user's approval or provider choice. Nothing was
+// shown or run; ask the user later with an interactive call.
+const ServiceErrInteractionRequired = "interaction_required"
 
 // ServiceFile is a service file token with its metadata (never a path).
 type ServiceFile struct {
@@ -184,7 +193,8 @@ func (e *ServiceCallError) Error() string { return e.Message }
 
 // ServiceErrorCode returns the service error code of err: a
 // *ServiceCallError's Code, or the code a host error carries ("not_found",
-// "too_large", "busy", "cancelled", ...). "" when there is none.
+// "too_large", "busy", "cancelled", ServiceErrInteractionRequired, ...). ""
+// when there is none.
 func ServiceErrorCode(err error) string {
 	var callErr *ServiceCallError
 	if errors.As(err, &callErr) {
@@ -236,12 +246,16 @@ func serviceCallParams(call ServiceCall) (map[string]any, error) {
 	if call.TimeoutMs > 0 {
 		params["timeoutMs"] = call.TimeoutMs
 	}
+	if call.NoPrompt {
+		params["interactive"] = false
+	}
 	return params, nil
 }
 
 // InvokeService calls host.services.invoke (plugins capability) and waits
 // for the result. The user may be asked to approve the call and to pick a
-// provider; a declined call is a host error with code -32003. The host-call
+// provider; a declined call is a host error with code -32003. With NoPrompt
+// a call that would ask fails with ServiceErrInteractionRequired instead. The host-call
 // timeout covers the prompts (TimeoutMs), the provider's run (ExecTimeoutMs,
 // default the 300 s maximum) and a 5 s margin. Use StartService for progress
 // or cancellation.
