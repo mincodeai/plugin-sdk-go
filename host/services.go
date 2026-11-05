@@ -561,6 +561,13 @@ type ServiceCallerInfo struct {
 	Kind     string `json:"kind"`
 	PluginID string `json:"pluginId,omitempty"`
 	Surface  string `json:"surface,omitempty"`
+	// Plugin-only, after ServiceCallerMetadata opt-in: builtin, local,
+	// development or unknown. Not authentication or proof of official origin.
+	Source string `json:"source,omitempty"`
+	// nil means unknown, distinct from confirmed false.
+	Development *bool `json:"development,omitempty"`
+	// Host omits manifest versions over 128 UTF-8 bytes, never truncates.
+	Version string `json:"version,omitempty"`
 }
 
 // ServiceRequest is the payload a provider's action receives. Text is set

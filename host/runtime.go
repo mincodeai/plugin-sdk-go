@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -98,6 +99,9 @@ func Describe(ctx context.Context, c Caller) (Description, error) {
 	raw, err := call(ctx, c, "host.api.describe", map[string]any{})
 	if err != nil {
 		return Description{}, err
+	}
+	if value := bytes.TrimSpace(raw); len(value) == 0 || value[0] != '{' {
+		return Description{}, errors.New("host.api.describe result must be an object")
 	}
 	var description Description
 	return description, decodeInto(raw, &description)
@@ -262,6 +266,94 @@ func WriteWorkspaceFile(ctx context.Context, c Caller, path string, data []byte,
 	return result, decodeInto(raw, &result)
 }
 
+// SearchProviderPayload is the search action input. Project is present only
+// after SearchFileTargets negotiation and a ready host scope.
+type SearchProviderPayload struct {
+	Provider string         `json:"provider"`
+	Query    string         `json:"query"`
+	Locale   string         `json:"locale"`
+	Project  *SearchProject `json:"project,omitempty"`
+}
+type SearchProject struct {
+	Name string `json:"name"`
+	Root string `json:"root"`
+}
+
+// SearchResultTarget preserves view/command/url targets and adds file targets.
+// A file path is clean, slash-separated and root-relative. Line/Column are
+// optional 1-based positions (column requires line), at most 10,000,000.
+type SearchResultTarget struct {
+	Type    string         `json:"type"`
+	View    string         `json:"view,omitempty"`
+	Command string         `json:"command,omitempty"`
+	Args    map[string]any `json:"args,omitempty"`
+	URL     string         `json:"url,omitempty"`
+	Path    string         `json:"path,omitempty"`
+	Line    *int           `json:"line,omitempty"`
+	Column  *int           `json:"column,omitempty"`
+}
+type SearchResultItem struct {
+	ID     string             `json:"id"`
+	Title  string             `json:"title"`
+	Detail string             `json:"detail,omitempty"`
+	Target SearchResultTarget `json:"target"`
+}
+
+// SearchFileScope and ProviderRuntime are host-owned. Providers return only
+// items and must never invent scopes or identities. Revision, Instance and
+// Generation are canonical decimal strings, not floating-point numbers.
+type SearchFileScope struct {
+	WorkspaceID string `json:"workspaceId"`
+	Root        string `json:"root"`
+	Revision    string `json:"revision"`
+}
+type ProviderRuntime struct {
+	Instance   string `json:"instance"`
+	Generation string `json:"generation"`
+}
+
+// SearchResponse is the host-normalized response, not a provider's result.
+type SearchResponse struct {
+	Items           []SearchResultItem `json:"items"`
+	Dropped         int                `json:"dropped"`
+	Truncated       bool               `json:"truncated"`
+	FileScope       *SearchFileScope   `json:"fileScope,omitempty"`
+	ProviderRuntime *ProviderRuntime   `json:"providerRuntime,omitempty"`
+}
+
+// WorkspaceFileBatch is fileCreated/fileDeleted (Paths) or fileRenamed
+// (Renames). Origin is host or watcher. ScopeRevision remains a string.
+type WorkspaceFileBatch struct {
+	Paths          []string          `json:"paths,omitempty"`
+	Renames        []WorkspaceRename `json:"renames,omitempty"`
+	ScopeRevision  string            `json:"scopeRevision"`
+	Origin         string            `json:"origin"`
+	RescanRequired bool              `json:"rescanRequired"`
+}
+type WorkspaceRename struct {
+	OldPath string `json:"oldPath"`
+	NewPath string `json:"newPath"`
+}
+
+// WorkspaceRescanData.Reason is overflow, truncated, sourceLost or deliveryLost.
+type WorkspaceRescanData struct {
+	ScopeRevision string `json:"scopeRevision"`
+	Reason        string `json:"reason"`
+}
+type GitStatusData struct {
+	ScopeRevision string `json:"scopeRevision"`
+	Staged        int    `json:"staged"`
+	Unstaged      int    `json:"unstaged"`
+	Untracked     int    `json:"untracked"`
+	Conflicted    int    `json:"conflicted"`
+}
+type AppLockData struct {
+	Locked bool `json:"locked"`
+}
+
+// App suspend/resume data is an empty JSON object. Availability must be
+// checked through Describe; a feature offer does not confirm a native source.
+
 // Host events. Subscribe with the rpc Options.Events field (or
 // SubscribeEvents) and receive them in Options.OnEvent. Events that carry
 // paths need workspace.read; they reach only a running plugin.
@@ -270,6 +362,18 @@ const (
 	EventWorkspaceRootChanged = "workspace.rootChanged"
 	EventActiveFileChanged    = "editor.activeFileChanged"
 	EventFileSaved            = "editor.fileSaved"
+	// File/Git events need workspace.read. Check Describe.Events availability;
+	// feature offers do not imply an event source is available.
+	EventFileCreated      = "workspace.fileCreated"
+	EventFileDeleted      = "workspace.fileDeleted"
+	EventFileRenamed      = "workspace.fileRenamed"
+	EventRescanRequired   = "workspace.rescanRequired"
+	EventGitStatusChanged = "git.statusChanged"
+	// Lock notifications are hints, not an authorization or unlock API.
+	EventAppLockChanged = "app.lockChanged"
+	// Power events are unavailable until the host confirms a real source.
+	EventAppSuspend = "app.suspend"
+	EventAppResume  = "app.resume"
 	// EventSelectionChanged carries { path, selection: { startLine, startColumn, endLine, endColumn } }.
 	EventSelectionChanged = "editor.selectionChanged"
 	// EventGitHeadChanged carries { branch?, detached, commit? } for the workspace root.

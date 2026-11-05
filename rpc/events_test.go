@@ -34,6 +34,16 @@ func TestHostEventsSubscribeAndDispatch(t *testing.T) {
 		t.Fatalf("initialize: %s", reply)
 	}
 	if !p.out.Scan() {
+		t.Fatal("no describe request")
+	}
+	var discovery struct{ ID, Method string }
+	if err := json.Unmarshal(p.out.Bytes(), &discovery); err != nil || discovery.Method != "host.api.describe" {
+		t.Fatalf("describe request: %s %v", p.out.Text(), err)
+	}
+	if _, err := p.in.Write([]byte(`{"jsonrpc":"2.0","id":"` + discovery.ID + `","result":{"events":[{"name":"workspace.changed","available":true},{"name":"editor.fileSaved","available":true}]}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !p.out.Scan() {
 		t.Fatal("no subscription request")
 	}
 	var request struct {
@@ -59,6 +69,34 @@ func TestHostEventsSubscribeAndDispatch(t *testing.T) {
 	}
 	if reply := p.call(`{"jsonrpc":"2.0","id":3,"method":"plugin.event","params":{}}`); !strings.Contains(reply, "-32602") {
 		t.Fatalf("invalid event: %s", reply)
+	}
+}
+
+func TestHostEventsAvailability(t *testing.T) {
+	for _, description := range []string{
+		`{"events":[{"name":"workspace.changed","available":true},{"name":"app.suspend","available":false},{"name":"workspace.fileCreated","available":false},{"name":"ai.activity","available":true}]}`,
+		// An old host omits the new event names entirely.
+		`{"events":[{"name":"workspace.changed","available":true},{"name":"ai.activity","available":true}]}`,
+	} {
+		t.Run(description, func(t *testing.T) {
+			o := rpc.StrictDefaults("x")
+			o.Handler = func(context.Context, string, json.RawMessage) (any, error) { return nil, nil }
+			o.Events = []string{host.EventWorkspaceChanged, host.EventFileCreated, host.EventAppSuspend}
+			o.OnEvent = func(context.Context, string, json.RawMessage, host.Caller) {}
+			p := startLargePeer(t, o)
+			p.send(`{"jsonrpc":"2.0","id":1,"method":"plugin.initialize","params":{}}`)
+			p.next()
+			request := p.next()
+			if string(request["method"]) != `"host.api.describe"` {
+				t.Fatalf("must describe before subscribing: %s", request)
+			}
+			p.send(`{"jsonrpc":"2.0","id":` + string(request["id"]) + `,"result":` + description + `}`)
+			request = p.next()
+			if string(request["method"]) != `"host.events.subscribe"` || string(request["params"]) != `{"events":["workspace.changed"]}` {
+				t.Fatalf("must subscribe only requested available events: %s", request)
+			}
+			p.send(`{"jsonrpc":"2.0","id":` + string(request["id"]) + `,"result":{"events":["workspace.changed"]}}`)
+		})
 	}
 }
 

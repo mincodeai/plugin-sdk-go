@@ -4,6 +4,14 @@ MinCode 官方进程插件（`official-plugins/*/backend`）共用的 Go SDK。�
 
 它把各插件里重复实现的 stdio NDJSON JSON-RPC 2.0 循环（运行时协议 v1：`plugin.initialize`、`ping`、`shutdown`、`invoke`、`plugin.task.*`，以及反向 `host.storage.*` / `host.secrets.*` 请求）、严格 JSON 校验、连接配置档（profiles）存储与凭据记忆收拢到一处。设计目标是**迁移不改变一个协议字节**：各插件之间所有可观察到的线上差异都是 `rpc.Options` 的开关，并由 `testdata/golden` 里从原插件二进制录制的对话逐字节回放验证。
 
+## 搜索文件目标、caller 与新增事件（0.3.0 开发版）
+
+- `rpc.Options.SearchFileTargets` / `ServiceCallerMetadata` 均默认 `false`，只有显式设为 `true` 且宿主 offer 对应版本 `1` 才回显；旧宿主无 offer、版本不符或未 opt-in 都不回显，旧严格搜索 payload 与 service caller 形状不变。SearchFileTargets 只向有 `workspace.read` 的进程提供。
+- `host.SearchProviderPayload.Project` 是协商后宿主提供的当前项目名称/根；提供方只返回 `SearchResultItem`，文件目标是相对路径及可选 1-based 行列（列依赖行）。`host.SearchResponse` 的 `FileScope` / `ProviderRuntime` 由宿主填写，不允许插件编造；revision、instance、generation 都保留十进制字符串，不能转成浮点数。
+- `host.ServiceCallerInfo` 的插件 caller 可含 `Source`（builtin/local/development/unknown）、`Development *bool`（nil 是未知，区别于 false）、`Version`（超过 128 UTF-8 字节宿主省略）。host caller 只有 kind/surface，不增加插件来源字段。元数据不是身份认证、官方/市场来源证明或授权凭证。
+- 新常量：`EventFileCreated`、`EventFileDeleted`、`EventFileRenamed`、`EventRescanRequired`、`EventGitStatusChanged`、`EventAppLockChanged`、`EventAppSuspend`、`EventAppResume`。文件/Git 事件需 `workspace.read`；`WorkspaceFileBatch` 带 string scopeRevision、origin（host/watcher）、rescanRequired 与 paths/renames；`WorkspaceRescanData` 的 reason 是 overflow/truncated/sourceLost/deliveryLost；`GitStatusData` 只有非负状态计数；锁事件 `AppLockData` 不是解锁或授权接口，电源事件是空对象。
+- `Options.Events` 在首次 initialize 回复后异步 `host.Describe`，只提交明确需求与 Available:true 的交集，不追加事件；旧宿主缺新事件条目或缺 Available 字段按 unsupported 处理，仍保留可用旧事件。空配置/空交集不发送 subscribe，不清空另外建立的集合；显式取消用 `host.SubscribeEvents(..., []string{})`。真正的 describe/subscribe RPC 或解码失败仍写 stderr，不退回未过滤列表，initialize ack 本身不表示订阅已成功。显式 SubscribeEvents helper 不过滤，仍返回不可用事件错误。最多 16 项，runtime offer 不代表事件可用，目前所有平台原生 suspend/resume 都报告不可用。Node testing/mock 可显式模拟 fake 确认，但不证明实际存在原生来源。
+
 ## 在插件里引用
 
 仓库外的插件直接 `go get github.com/mincodeai/plugin-sdk-go@latest`。
@@ -26,13 +34,13 @@ replace github.com/mincodeai/plugin-sdk-go => ../../../packages/plugin-sdk-go
 replace github.com/mincodeai/plugin-sdk-go => ./third_party/plugin-sdk-go
 ```
 
-目前的使用方是 Vue + Go 与 TypeScript + Go 插件模板（`tools/plugin-templates/visual-process-vue-go/backend`、`visual-process-ts-go/backend`，内置在 `mincode` 命令行工具里，经 `mincode plugin create` 复制到开发者机器）和 draw（gitlink 仓库，由自己的 CI 构建；协议配置与 excalidraw 相同）。副本由 `tools/plugin-sdk/sync-go-sdk.mjs` 生成：只含 `go.mod`、`README.md`、`LICENSE` 与非测试 `.go` 源码（不含 `*_test.go`），另写一个记录校验和的 `VERSION`。**不要手改副本**，改 SDK 后运行：
+目前的使用方是 draw（gitlink 仓库，由自己的 CI 构建；协议配置与 excalidraw 相同），以及旧版 `mincode plugin create` 生成的第三方项目。插件模板（`tools/plugin-templates/visual-process-{vue,ts}-go/backend`）不再携带副本：仓库内由 `// mincode:workspace` 标记的 replace 指向 `../../../../packages/plugin-sdk-go`，`mincode plugin create` 生成项目时删除这条 replace，改为 `require` 本模块与 MinCode 同号的已发布版本。副本由 `tools/plugin-sdk/sync-go-sdk.mjs` 生成：只含 `go.mod`、`README.md`、`LICENSE` 与非测试 `.go` 源码（不含 `*_test.go`），另写一个记录校验和的 `VERSION`。**不要手改副本**，改 SDK 后运行：
 
 - `pnpm sync:go-sdk`：刷新全部副本（draw 未检出时跳过）；
-- `pnpm verify:go-sdk-vendor`（CI 执行）：副本与本目录不一致即失败；`pnpm verify:plugin-template` 也会先检查模板副本；
+- `pnpm verify:go-sdk-vendor`（CI 执行）：副本与本目录不一致即失败；
 - `node scripts/test-go-plugins.mjs draw`（在 `vue-app` 下）：要求 draw 的 replace 指向 `./third_party/plugin-sdk-go` 且副本无漂移。
 
-仓库外的插件用新版 `mincode` 命令行工具的 `mincode plugin sync [项目目录]` 更新自己的副本（来源是命令行工具内置的同一份副本，加 `--check` 只检查）。没有命令行工具时，devkit 导出时另附的 `sdk/go`（同样的副本）和 `tools/sync-go-sdk.mjs` 可作备用：在套件根目录运行 `node tools/sync-go-sdk.mjs --source sdk/go <项目>/backend`。
+仓库外的旧项目用新版 `mincode` 命令行工具的 `mincode plugin upgrade [项目目录]` 迁移为依赖已发布模块；暂不迁移时用 `mincode plugin sync [项目目录]` 更新自己的副本（来源是命令行工具内置的同一份副本，加 `--check` 只检查）。没有命令行工具时，devkit 导出时另附的 `sdk/go`（同样的副本）和 `tools/sync-go-sdk.mjs` 可作备用：在套件根目录运行 `node tools/sync-go-sdk.mjs --source sdk/go <项目>/backend`。
 
 不要提交 `go.work` / `go.work.sum`（已在根 `.gitignore`）；本地想联调可以自建 go.work，但 CI 与发布构建都是 `GOWORK=off`。
 
@@ -364,3 +372,11 @@ golden 对话与回放测试位于 `packages/plugin-sdk-go-conformance/`（模�
 ## 系统关联
 
 `system.associations` 的 ListAssociations / RequestAssociationSettings / ReadAssociatedFile 只服务声明的 externalOpenHandlers。设置始终由宿主确认，读取使用授权请求 ID，不能提供任意路径；最大 16 MiB、64 KiB 分块。参考 [插件开发指南](../../docs/development/plugin-development.md#系统文件与链接接管externalopenhandlers)。
+
+## 显式 opt-in 示例与宿主边界
+
+在现有 rpc.Options 中分别选择 `SearchFileTargets: true`、`ServiceCallerMetadata: true`；不要通过设置其中一个隐式打开另一个。两项都默认关闭且仅回显宿主 offer 的版本 1。搜索 handler 解码到 `host.SearchProviderPayload`，Project 为 nil 时保留旧目标或明确不可用；返回 `host.SearchResultItem`，不要伪造 FileScope/ProviderRuntime。`SearchResultTarget{Type:"file",Path:"src/main.go",Line:&line,Column:&column}` 中行列是 1-based，column 依赖 line，路径 ≤1024 UTF-8 字节且受 OS PATH_MAX 约束。
+
+服务 handler 用 `host.DecodeServiceRequest`；`request.Caller.Development == nil` 表示未知，非 nil 才能读取明确 true/false。市场安装仍是 local，来源/清单版本不证明官方身份或签名，不参与宿主授权。host caller 仍只有 kind/surface；host.plugins.invoke 继续传原 payload。
+
+完整八事件表、原子 begin/commit/get scope、Go 点击重验与来源矩阵见[指南 4.6](../../docs/development/plugin-development.md#46-搜索文件事件与-caller-契约030)。文件/Git 都是有界尽力提示，不是审计日志；外部 rename 可不配对、短暂变化/过滤路径可遗漏，linked worktree/外部 metadata/项目子目录仍为 unknown。当前 macOS/Windows/Linux 的原生 suspend/resume 均 unavailable，mock/fake 确认不能证明原生来源。实际验证与平台覆盖只在[验收清单](../../docs/verification/plugin-search-events-caller.md)记录。

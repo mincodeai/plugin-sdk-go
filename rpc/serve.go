@@ -443,11 +443,13 @@ func (s *server) handleLine(line []byte) bool {
 	case "plugin.initialize":
 		var p struct {
 			Features struct {
-				Tasks           json.RawMessage `json:"tasks"`
-				TaskEvents      json.RawMessage `json:"taskEvents"`
-				Configuration   json.RawMessage `json:"configuration"`
-				DatabaseDrivers json.RawMessage `json:"databaseDrivers"`
-				LargeStorage    json.RawMessage `json:"largeStorage"`
+				Tasks                 json.RawMessage `json:"tasks"`
+				TaskEvents            json.RawMessage `json:"taskEvents"`
+				Configuration         json.RawMessage `json:"configuration"`
+				DatabaseDrivers       json.RawMessage `json:"databaseDrivers"`
+				LargeStorage          json.RawMessage `json:"largeStorage"`
+				SearchFileTargets     json.RawMessage `json:"searchFileTargets"`
+				ServiceCallerMetadata json.RawMessage `json:"serviceCallerMetadata"`
 			} `json:"features"`
 		}
 		_ = json.Unmarshal(params, &p)
@@ -477,6 +479,12 @@ func (s *server) handleLine(line []byte) bool {
 				s.o.FatalLineBytes = max(s.o.FatalLineBytes, LargeStorageLineBytes+1)
 			}
 		}
+		if s.o.SearchFileTargets && string(p.Features.SearchFileTargets) == "1" {
+			result = withFeature(result, "searchFileTargets", s.o.Style == StyleSorted)
+		}
+		if s.o.ServiceCallerMetadata && string(p.Features.ServiceCallerMetadata) == "1" {
+			result = withFeature(result, "serviceCallerMetadata", s.o.Style == StyleSorted)
+		}
 		if identity := s.identity(); identity != nil {
 			result = withIdentity(result, identity)
 		}
@@ -488,7 +496,24 @@ func (s *server) handleLine(line []byte) bool {
 		if first && len(s.o.Events) > 0 && s.o.OnEvent != nil {
 			events := append([]string(nil), s.o.Events...)
 			go func() {
-				if _, err := host.SubscribeEvents(s.ctx, s.host, events); err != nil && s.errOut != nil {
+				description, err := host.Describe(s.ctx, s.host)
+				if err == nil {
+					available := make(map[string]bool, len(description.Events))
+					for _, entry := range description.Events {
+						available[entry.Name] = entry.Available
+					}
+					selected := make([]string, 0, len(events))
+					for _, event := range events {
+						if available[event] {
+							selected = append(selected, event)
+						}
+					}
+					// Empty intersection is unsupported, not an explicit unsubscribe.
+					if len(selected) > 0 {
+						_, err = host.SubscribeEvents(s.ctx, s.host, selected)
+					}
+				}
+				if err != nil && s.errOut != nil {
 					_, _ = io.WriteString(s.errOut, "plugin event subscription failed\n")
 				}
 			}()

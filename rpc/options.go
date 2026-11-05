@@ -147,6 +147,13 @@ type Options struct {
 	// LargeStorageLineBytes. Hosts without the feature keep every message,
 	// and so every stored value, within 1 MiB.
 	LargeStorage bool
+	// SearchFileTargets opts in to features.searchFileTargets = 1 only when
+	// offered (workspace.read). Default false preserves strict old payloads.
+	SearchFileTargets bool
+	// ServiceCallerMetadata opts in to host-filled caller source/development/
+	// version fields, only when offered at version 1. Metadata is not identity
+	// authentication and never replaces the host's authorization.
+	ServiceCallerMetadata bool
 	// FatalMessage is written to stderr (plus newline) when Serve fails
 	// (read/write error or fatal overlong line).
 	FatalMessage string
@@ -216,9 +223,13 @@ type Options struct {
 	// host.GetConfiguration. Nil keeps the initialize result unchanged.
 	OnConfigurationChanged func(ctx context.Context, keys []string, h host.Caller)
 
-	// Events are host events (host.EventWorkspaceChanged, ...) subscribed right
-	// after the first plugin.initialize; they need OnEvent. Events carrying
-	// paths need the workspace.read capability.
+	// Events are requested host events (host.EventWorkspaceChanged, ...); they
+	// need OnEvent. After the first initialize, Describe filters the list to
+	// explicitly available events, never adding others. Missing entries or
+	// Available fields are unsupported. An empty intersection sends no subscribe
+	// (use host.SubscribeEvents with [] to unsubscribe explicitly). Discovery or
+	// subscription errors are logged, not retried with the unfiltered list.
+	// Paths need workspace.read; initialize acknowledgement does not await this work.
 	Events []string
 	// OnEvent runs in its own goroutine for each plugin.event request, after
 	// the empty reply. data is the event payload. Nil answers plugin.event
