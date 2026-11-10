@@ -74,4 +74,14 @@ func TestAIGrantsAndApproval(t *testing.T) {
 		string(params) != `{"conversationKey":"k","prompt":"hi","allowedPlugins":null,"maxRisk":"read","chatApproval":true}` {
 		t.Fatalf("start params %s %v", params, err)
 	}
+	if _, err := StartAITurn(context.Background(), caller, AITurnRequest{ConversationKey: "k", Prompt: "hi", History: AITurnHistoryNone}); err != nil ||
+		string(params) != `{"conversationKey":"k","prompt":"hi","allowedPlugins":null,"history":"none"}` {
+		t.Fatalf("history none params %s %v", params, err)
+	}
+	method = ""
+	for _, history := range []string{"all", "None", " none"} {
+		if _, err := StartAITurn(context.Background(), caller, AITurnRequest{ConversationKey: "k", Prompt: "hi", History: history}); err == nil || method != "" {
+			t.Fatalf("history %q must be refused before calling the host: %v %s", history, err, method)
+		}
+	}
 }

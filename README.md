@@ -119,6 +119,7 @@ func handle(ctx context.Context, action string, payload json.RawMessage) (any, e
 
 AI 回合（清单能力 `ai`，API v2）：`host.StartAITurn` / `PollAITurn` / `CancelAITurn` 把一条消息交给桌面端 AI 助手回答，轮询得到的 `AITurnState.Text` 是截至目前的完整回答（不是增量），`Done` 为 true 时结束；语义与限制见 `docs/architecture/plugin-system.md`。
 `host.CompleteAITurn(ctx, c, req, poll, partial)` 封装启动→轮询→结束（ctx 取消时同时取消回合），返回最终文本；`host.ClassifyAIError(err)` 把限流、并发上限、缺能力、宿主不支持、回合失败等归为 `AIErrorKind`，便于插件显示本地化提示。官方插件页面用 `@mincode/plugin-ui/tasks.mjs` 的 `runAIAction` 以任务方式调用这类动作（见 `docs/development/plugin-development.md` 5.3 节）。
+每条提示都已自带上下文时（批量、逐条生成），设 `AITurnRequest.History = host.AITurnHistoryNone`：模型只收到系统提示、`Instructions` 和本回合 `Prompt`，不重放会话之前的消息（回合仍记录在会话中；之后同一会话的默认回合可能重放这些消息，批量调用请单独用一个 `ConversationKey`）。旧宿主会忽略该字段并照常带历史，依赖它之前先确认 `host.Describe(ctx, c)` 的 `Features["aiTurnHistory"] == 1`；`StartAITurn` 在本地拒绝 `""` / `"none"` 以外的值。
 
 状态栏（`contributes.statusBar`，能力 `commands`，API v2）：`host.UpdateStatusBarItem(ctx, c, host.StatusBarUpdate{ID, Text, Tooltip, Severity, Busy, Visible})` 更新声明为 `"dynamic": true` 的条目（nil 字段保持原值），`host.ResetStatusBar(ctx, c, id)` 恢复单个条目，`id` 为空时恢复全部。宿主合并推送（最新值生效）、超过 50 次/秒的更新静默丢弃，插件停止/崩溃/禁用/重载/卸载时清空动态状态。
 

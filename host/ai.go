@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // AI turns (manifest capability "ai"): ask the desktop AI assistant to answer
@@ -37,7 +38,23 @@ type AITurnRequest struct {
 	// WorkspaceAccess runs the turn like a local conversation (active workspace
 	// project, all tools, still with approvals). Requires the desktop grant.
 	WorkspaceAccess bool `json:"workspaceAccess,omitempty"`
+	// History controls what the model sees of the conversation. "" (default)
+	// replays the conversation's earlier messages before Prompt;
+	// AITurnHistoryNone sends only the system prompt, Instructions and this
+	// Prompt (tool calls of the same turn still see each other). The turn is
+	// still recorded in the conversation. Use it for self-contained prompts
+	// that would otherwise grow the replayed history every turn.
+	//
+	// Hosts released before this field ignore it and replay the history:
+	// check Describe(ctx, c).Features["aiTurnHistory"] == 1 (also offered in
+	// plugin.initialize features) before relying on it. StartAITurn refuses
+	// any value other than "" and AITurnHistoryNone without calling the host.
+	History string `json:"history,omitempty"`
 }
+
+// AITurnHistoryNone is the AITurnRequest.History value that runs a turn
+// without the conversation's earlier messages.
+const AITurnHistoryNone = "none"
 
 // AITurnApproval is a pending tool approval of a ChatApproval turn.
 type AITurnApproval struct {
@@ -126,6 +143,9 @@ func ApproveAITurn(ctx context.Context, c Caller, id, approvalID string, approve
 
 // StartAITurn submits a turn and returns its initial state.
 func StartAITurn(ctx context.Context, c Caller, request AITurnRequest) (AITurnState, error) {
+	if request.History != "" && request.History != AITurnHistoryNone {
+		return AITurnState{}, errors.New(`ai turn history must be "none" or empty`)
+	}
 	return aiTurnCall(ctx, c, "host.ai.turn.start", request)
 }
 
