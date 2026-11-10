@@ -392,6 +392,11 @@ const (
 	// change and every minute while tasks are listed. It never contains
 	// conversation content, tool details or session/workspace identifiers.
 	EventAITasks = "ai.tasks"
+	// EventTestRunEnded (capability workspace.read, host 0.3.0) carries
+	// TestRunEndedData { runId, reason }: the debug session of a streaming
+	// test run ended (see PublishTestEvents). It is sent to the run's plugin
+	// only, whether or not it subscribed; stop listening and clean up.
+	EventTestRunEnded = "tests.runEnded"
 )
 
 // SubscribeEvents replaces this process's subscriptions ([] unsubscribes) and
