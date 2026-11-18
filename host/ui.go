@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Generic host UI requests (wails-app/backend/plugin/host_ui.go). Navigation
+// Generic host UI requests (app/backend/plugin/host_ui.go). Navigation
 // requests return as soon as the host accepted them; each plugin may send at
 // most 20 per minute. Prompts wait for the user for TimeoutMs (default 25 s,
 // 5000-300000) and a plugin can have one prompt open at a time; these helpers

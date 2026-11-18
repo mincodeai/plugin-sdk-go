@@ -15,7 +15,7 @@ import (
 // Services (host.services.*): call capabilities other plugins provide, and
 // provide them. Callers need the plugins capability; providers need nothing
 // extra. See docs/development/plugin-development.md and
-// wails-app/backend/plugin/host_services.go for the host side.
+// app/backend/plugin/host_services.go for the host side.
 //
 // Calling: InvokeService waits for the result; StartService + WaitService
 // report progress and can be cancelled with CancelService. File inputs come
